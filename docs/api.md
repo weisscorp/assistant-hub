@@ -3,7 +3,10 @@
 Hub's default origin is `http://127.0.0.1:8778`. Authenticated requests send
 `Authorization: Bearer <private-token>`. Browser login uses an HttpOnly,
 SameSite cookie, normally obtained through `tools/local_stack.py open`.
-Host/Origin checks reject arbitrary origins. This is a single-owner local API.
+Host/Origin checks reject arbitrary origins. This is a single-owner API.
+Named, revocable client keys and a trusted HTTPS reverse proxy are supported;
+see [API keys and Internet access](internet-access.md). Secrets belong in the
+Bearer header, not a URL. All keys have full owner access.
 
 | Method/path | Role |
 |---|---|
@@ -38,7 +41,9 @@ See `hub_server.py` and HTTP tests for exact validation and response fields.
 Without `query`, `/api/context` is an explicit manual export; automatic provider
 inference always supplies the current request for indexed recall. The restricted
 `/coucou/CAPABILITY/v1/...` facade accepts Coucou's fixed local-provider bearer and
-does not authorize other API paths.
+does not authorize other API paths and is accepted only on direct loopback,
+never through the public HTTPS origin. Failed authentication returns 401;
+repeated failures return 429 with Retry-After. Public cookies use Secure.
 
 Providers implement `status()` and `run(task, coordinator, cancel, emit)` in
 `hub_providers.py`. Implement a new adapter there and register its config type

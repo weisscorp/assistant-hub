@@ -1,15 +1,26 @@
 # Private state and security boundary
 
-This is a local single-owner development service, not a hosted multi-user product.
+This is a self-hosted single-owner development service, not a hosted multi-user product.
 It defaults to 127.0.0.1; an owner can explicitly bind a literal private/VPN
 interface (see [transport](docs/capabilities.md)). It validates Host/Origin.
-Browser tickets are short-lived
-and single-use; full API access requires the owner's generated bearer token.
-Coucou has a separate limited chat capability URL. None of these values are
-public configuration. Source publication does not open a network listener.
+Browser tickets are short-lived and single-use; full API access requires the
+owner's generated bearer token or a named client key. Named keys store only
+digests and can be revoked locally, including their browser sessions/tickets.
+All keys have full owner access; there are no separate tenants or per-node grants.
+Coucou has a separate limited chat capability URL accepted only on direct
+loopback. None of these credentials are public configuration. Source publication
+does not open a network listener.
+
+Internet access requires an HTTPS reverse proxy with an explicit public origin
+and trusted proxy IP configuration. Public cookies are Secure/HttpOnly/SameSite,
+origin-bound, and cookie POSTs require a matching Origin. Authentication failures
+are rate-limited with bounded in-memory state. See [deployment](docs/internet-access.md)
+for key management, HAProxy headers and transport boundaries. This layer is API
+authentication, not a replacement for proxy connection/rate limits or isolation
+of trusted agent code.
 
 Use HTTP only inside a trusted encrypted VPN; a LAN IP alone provides no transport
-encryption. Node workers hold the owner's full token and are trusted owner code;
+encryption. Node workers hold a full owner-access key and are trusted owner code;
 per-node grants are not yet supported. They execute only their installed catalog,
 not arbitrary model-supplied shell commands. Recovery marks dispatched actions
 with a lost result as unknown and never automatically repeats them.

@@ -1,7 +1,7 @@
 """Listener selection without opening any LAN/VPN socket."""
 import unittest
 from types import SimpleNamespace
-from hub_network import bind_ip, hub_url
+from hub_network import bind_ip, hub_url, ProxyOrigin
 from hub_server import HubHandler
 
 
@@ -21,6 +21,24 @@ class NetworkTests(unittest.TestCase):
         for headers in ({'Host':'localhost:8778'},{'Host':'10.42.0.1:8778','Origin':'http://10.42.0.2:8778'}):
             handler.headers=headers
             with self.assertRaises(PermissionError):handler.check_origin()
+
+    def test_public_origin_is_explicit_https_and_proxies_are_private(self):
+        for url in ('https://hub.example.com','https://hub.example.com:8443/',
+                    'https://[2001:db8::1]:443','https://203.0.113.1'):
+            config=ProxyOrigin({'public_url':url,'trusted_proxies':['127.0.0.1','::1','10.42.0.0/24']})
+            self.assertEqual(config.origin,url.rstrip('/'))
+            self.assertTrue(config.trusted('127.0.0.1'))
+            self.assertTrue(config.trusted('10.42.0.3'))
+            self.assertFalse(config.trusted('203.0.113.1'))
+        for url in ('http://hub.example.com','https://u:p@hub.example.com','https://hub.example.com/path',
+                    'https://hub.example.com?token=x','https://hub.example.com#x','https://hub.example.com:',
+                    'https://hub.example.com:0','https://Hub.example.com','https://hub.example.com.',
+                    'https://hub%2eexample.com','https://hub.example.com:99999','https://hub.example.com\\evil'):
+            with self.assertRaises(ValueError):ProxyOrigin({'public_url':url,'trusted_proxies':['127.0.0.1']})
+        for proxies in ([], ['0.0.0.0/0'], ['::/0'], ['8.8.8.8'], ['10.42.0.2/24'], '127.0.0.1'):
+            with self.assertRaises(ValueError):ProxyOrigin({'public_url':'https://hub.example.com','trusted_proxies':proxies})
+        with self.assertRaises(ValueError):ProxyOrigin({'trusted_proxies':['127.0.0.1']})
+        self.assertIsNone(ProxyOrigin({}).origin)
 
 
 if __name__=='__main__':unittest.main()

@@ -23,7 +23,8 @@ sequenceDiagram
 
 ## Network boundary
 
-Hub binds HTTP only on `127.0.0.1`; the Android client accepts **HTTPS** endpoints.
+Hub defaults to HTTP on `127.0.0.1` and can explicitly bind a private/VPN IP;
+the Android client accepts **HTTPS** endpoints.
 Changing an IP in the app cannot make loopback accessible. A separately deployed
 TLS gateway must proxy `/conversation` and `/link/...` to Hub, supply an allowed
 upstream Host, preserve Authorization and support the needed body limits. This
@@ -33,6 +34,7 @@ The app can use system-trusted HTTPS or its explicit private-LAN certificate
 pinning mode. For the latter, configure a certificate with the endpoint IP in
 its SAN and enter its SHA-256 certificate fingerprint through a trusted channel.
 Pinning does not skip expiry/hostname validation; there is no trust-on-first-use.
+Issue a separate [revocable client key](internet-access.md) for the phone.
 The Hub's token is supplied through the app's settings and stored using Android
 protected credential handling. Treat every token holder as trusted.
 

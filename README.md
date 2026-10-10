@@ -22,7 +22,8 @@ flowchart LR
 
 ## What works
 
-- Authenticated loopback HTTP API and browser UI; separate topics and focus per client.
+- Authenticated HTTP API and browser UI; separate topics and focus per client.
+- Named revocable API keys and an explicit public HTTPS origin behind a trusted reverse proxy.
 - Shared node capability discovery and durable action queue with executor acknowledgements.
 - Persistent Hub timers and topic notifications, accessible through the same model tools.
 - Optional computer worker and explicit private LAN/VPN listener address.
@@ -79,6 +80,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 - [Connected nodes, actions, timers and VPN transport](docs/capabilities.md)
 - [Android connection contract and current gaps](docs/android.md)
 - [API and extending providers](docs/api.md)
+- [API keys and Internet access through HAProxy](docs/internet-access.md)
 - [Security, private state and backups](SECURITY.md)
 - [Third-party credits and licenses](THIRD_PARTY.md)
 

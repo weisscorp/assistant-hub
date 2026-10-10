@@ -3,9 +3,9 @@ import argparse
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import ipaddress
 import os
 from pathlib import Path
-import secrets
 import socket
 import stat
 import threading
@@ -15,7 +15,8 @@ import uuid
 from agent_hub import Conflict, encoded, uid, text
 from hub_runtime import Coordinator, RuntimeStore, TERMINAL
 from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
-from hub_network import bind_ip, authority
+from hub_network import bind_ip, authority, ProxyOrigin
+from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited
 
 
 def private_json(path):
@@ -29,13 +30,16 @@ def private_json(path):
 class HubApplication:
     def __init__(self, config):
         self.config = config
+        self.proxy = ProxyOrigin(config)
         self.store = RuntimeStore(config['state'])
         self.store.recover()
         token_path=Path(config['token_file']);token_info=token_path.lstat()
         if not stat.S_ISREG(token_info.st_mode) or token_info.st_uid!=os.getuid() or token_info.st_mode&0o077 or token_info.st_size>8192:
             raise ValueError('Token must be an owned private regular file')
         self.token = token_path.read_text().strip()
-        if len(self.token) < 32: raise ValueError('Invalid bearer token')
+        self.auth = AccessKeys(self.store, self.token)
+        self.browser = BrowserCredentials(self.auth)
+        self.auth_failures = AuthFailures()
         self.device = self.store.setting('desktop-device')
         if not self.device:
             self.device = str(uuid.uuid4()); self.store.set_setting('desktop-device', self.device)
@@ -53,7 +57,6 @@ class HubApplication:
         from hub_mobile import MobileLink
         self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
         self.lock = threading.RLock()
-        self.sessions, self.tickets = {}, {}
         self.cached_status, self.status_at = {}, 0
 
     def coucou(self, row, kind, data):
@@ -82,15 +85,6 @@ class HubApplication:
             except Conflict: focus = self.store.focus(client)
         return focus
 
-    def session(self):
-        value = secrets.token_urlsafe(32)
-        with self.lock:
-            now = time.time()
-            self.sessions = {k:v for k,v in self.sessions.items() if v > now}
-            self.sessions[value] = now + 86400
-        return value
-
-
 class HubHandler(BaseHTTPRequestHandler):
     server_version = 'AssistantHub/0.1'
     protocol_version = 'HTTP/1.1'
@@ -105,17 +99,54 @@ class HubHandler(BaseHTTPRequestHandler):
         allowed = {authority(host, self.server.server_port)}
         if bind_ip(host).is_loopback:
             allowed.add(f'localhost:{self.server.server_port}')
-        if self.headers.get('Host') not in allowed: raise PermissionError('Invalid host')
+        self.public_request = False
+        self.auth_peer = self.client_address[0] if hasattr(self, 'client_address') else host
+        proxy = self.app.proxy if hasattr(self.server, 'app') else ProxyOrigin({})
+        if hasattr(self.headers, 'get_all'):
+            for name in ('Host', 'Origin', 'Authorization', 'Cookie', 'X-Forwarded-Proto',
+                         'X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'Content-Length'):
+                if len(self.headers.get_all(name, [])) > 1:
+                    raise PermissionError('Duplicate security header')
+        if self.headers.get('Transfer-Encoding') is not None:
+            raise PermissionError('Chunked requests are unsupported')
+        supplied_host = self.headers.get('Host')
+        forwarded = any(self.headers.get(h) is not None for h in
+                        ('X-Forwarded-Proto', 'X-Forwarded-Host', 'X-Forwarded-For', 'Forwarded'))
+        if supplied_host == proxy.host and proxy.host is not None:
+            if not proxy.trusted(self.auth_peer) or self.headers.get('X-Forwarded-Proto') != 'https':
+                raise PermissionError('HTTPS proxy required')
+            forwarded_host = self.headers.get('X-Forwarded-Host')
+            if forwarded_host is not None and forwarded_host != proxy.host:
+                raise PermissionError('Invalid forwarded host')
+            # One address only: HAProxy must overwrite, not append, this header.
+            forwarded_peer = self.headers.get('X-Forwarded-For')
+            if forwarded_peer:
+                self.auth_peer = str(ipaddress.ip_address(forwarded_peer))
+            self.public_request = True
+            self.request_origin = proxy.origin
+        else:
+            if supplied_host not in allowed or forwarded:
+                raise PermissionError('Invalid host or untrusted proxy headers')
+            self.request_origin = 'http://' + supplied_host
         origin = self.headers.get('Origin')
-        if origin and origin not in {'http://' + h for h in allowed}: raise PermissionError('Invalid origin')
+        if origin and origin != self.request_origin: raise PermissionError('Invalid origin')
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site': raise PermissionError('Invalid origin')
 
     def authorized(self):
-        header = self.headers.get('Authorization', '')
-        if header.startswith('Bearer ') and secrets.compare_digest(header[7:], self.app.token): return True
+        header = self.headers.get('Authorization')
+        # An explicitly supplied wrong bearer must not fall back to a browser cookie.
+        if header is not None:
+            return self.app.auth.resolve(header[7:]) if header.startswith('Bearer ') else None
         try:
             c = SimpleCookie(self.headers.get('Cookie','')); value = c.get('hub_session')
-            return bool(value and self.app.sessions.get(value.value,0) > time.time())
-        except Exception: return False
+            if self.command == 'POST' and self.headers.get('Origin') != self.request_origin:
+                return None
+            return self.app.browser.resolve(value.value, self.request_origin) if value else None
+        except Exception: return None
+
+    def session_cookie(self, principal):
+        value = self.app.browser.session(principal, self.request_origin)
+        return f'hub_session={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400' + ('; Secure' if self.public_request else '')
 
     def body(self):
         if self.headers.get('Transfer-Encoding'): raise ValueError('Chunked requests are unsupported')
@@ -142,6 +173,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(30)
             self.check_origin()
             url = urllib.parse.urlsplit(self.path)
+            if url.scheme or url.netloc: raise ValueError('Expected a relative request path')
             path, query = url.path, urllib.parse.parse_qs(url.query)
             get = lambda key, default=None: query.get(key,[default])[0]
             if path in {'/','/app.js','/app.css'} and method == 'GET':
@@ -150,20 +182,25 @@ class HubHandler(BaseHTTPRequestHandler):
                 return self.reply((Path(__file__).parent/'hub_ui'/filename).read_bytes(), mime=mime+'; charset=utf-8')
             if path == '/api/login' and method == 'POST':
                 body = self.body()
-                if not secrets.compare_digest(str(body.get('token','')),self.app.token): raise PermissionError('Неверный ключ Hub')
-                return self.reply({'ok':True},headers={'Set-Cookie':f'hub_session={self.app.session()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400'})
+                principal = self.app.auth.resolve(body.get('token'))
+                if not principal: self.app.auth_failures.reject(self.auth_peer)
+                return self.reply({'ok':True},headers={'Set-Cookie':self.session_cookie(principal)})
             if path == '/ticket' and method == 'GET':
-                with self.app.lock: expiry = self.app.tickets.pop(get('id',''),0)
-                if expiry < time.time(): raise PermissionError('Ticket expired')
-                return self.reply(b'',303,{'Location':'/', 'Set-Cookie':f'hub_session={self.app.session()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400'})
+                principal = self.app.browser.resolve(get('id',''), self.request_origin, ticket=True)
+                if not principal: self.app.auth_failures.reject(self.auth_peer)
+                return self.reply(b'',303,{'Location':'/', 'Set-Cookie':self.session_cookie(principal)})
             coucou_access=False
             prefix='/coucou/'+self.app.config.get('coucou_capability','unconfigured')
             if path in {prefix+'/v1/models',prefix+'/v1/chat/completions'}:
                 # Original Coucou's local provider sends a fixed "Bearer ollama".
                 # A separate scoped URL capability exposes only the model facade.
-                coucou_access=bool(self.app.config.get('coucou_capability')) and self.headers.get('Authorization')=='Bearer ollama'
+                coucou_access=(not self.public_request and bind_ip(self.server.server_address[0]).is_loopback
+                               and self.auth_peer in ('127.0.0.1','::1')
+                               and bool(self.app.config.get('coucou_capability'))
+                               and self.headers.get('Authorization')=='Bearer ollama')
                 path=path[len(prefix):]
-            if not self.authorized() and not coucou_access: raise PermissionError('Нужен ключ доступа к Hub')
+            principal = self.authorized()
+            if not principal and not coucou_access: self.app.auth_failures.reject(self.auth_peer)
             s = self.app.store
             if path.startswith('/link/'):
                 return self.mobile_request(path,query,method)
@@ -202,9 +239,7 @@ class HubHandler(BaseHTTPRequestHandler):
             else:
                 body = self.body()
                 if path == '/api/tickets':
-                    with self.app.lock:
-                        self.app.tickets = {k:v for k,v in self.app.tickets.items() if v > time.time()}
-                        ticket = secrets.token_urlsafe(32); self.app.tickets[ticket] = time.time()+60
+                    ticket = self.app.browser.ticket(principal, self.request_origin)
                     return self.reply({'path':'/ticket?id='+ticket})
                 if path == '/api/contexts': return self.reply(s.create_context(body['title']),201)
                 if path == '/api/focus': return self.reply(s.switch(body['client'],body['context_id'],body['revision']))
@@ -243,8 +278,15 @@ class HubHandler(BaseHTTPRequestHandler):
                 if path == '/conversation': return self.reply(self.app.mobile.turn(body))
             self.reply({'error':'Unknown endpoint'},404)
         except Conflict as error: self.reply({'error':str(error)},409)
-        except PermissionError as error: self.reply({'error':str(error)},401)
-        except (ValueError, KeyError, TypeError) as error: self.reply({'error':str(error)[:500]},400)
+        except RateLimited as error:
+            self.close_connection = True
+            self.reply({'error':str(error)},429,{'Retry-After':'60','Connection':'close'})
+        except PermissionError as error:
+            self.close_connection = True
+            self.reply({'error':str(error)},401,{'WWW-Authenticate':'Bearer realm="assistant-hub"','Connection':'close'})
+        except (ValueError, KeyError, TypeError) as error:
+            self.close_connection = True
+            self.reply({'error':str(error)[:500]},400,{'Connection':'close'})
         except (BrokenPipeError, ConnectionResetError, TimeoutError): pass
         except Exception: self.reply({'error':'Hub request failed; inspect the local runtime'},500)
 

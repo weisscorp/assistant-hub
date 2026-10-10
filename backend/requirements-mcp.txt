@@ -1,0 +1,2 @@
+# Separate from the standard-library-only HTTPS bridge. Official MCP Python SDK.
+mcp==1.26.0

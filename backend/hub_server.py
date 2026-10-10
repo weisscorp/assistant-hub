@@ -1,0 +1,309 @@
+"""Authenticated loopback HTTP facade for the local cross-device assistant."""
+import argparse
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import secrets
+import stat
+import threading
+import time
+import urllib.parse
+import uuid
+from agent_hub import Conflict, encoded, uid, text
+from hub_runtime import Coordinator, RuntimeStore, TERMINAL
+from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
+
+
+def private_json(path):
+    p = Path(path)
+    i = p.lstat()
+    if not stat.S_ISREG(i.st_mode) or i.st_uid != os.getuid() or i.st_mode & 0o077 or i.st_size > 64000:
+        raise ValueError('Config must be an owned private regular file')
+    return json.loads(p.read_bytes())
+
+
+class HubApplication:
+    def __init__(self, config):
+        self.config = config
+        self.store = RuntimeStore(config['state'])
+        self.store.recover()
+        token_path=Path(config['token_file']);token_info=token_path.lstat()
+        if not stat.S_ISREG(token_info.st_mode) or token_info.st_uid!=os.getuid() or token_info.st_mode&0o077 or token_info.st_size>8192:
+            raise ValueError('Token must be an owned private regular file')
+        self.token = token_path.read_text().strip()
+        if len(self.token) < 32: raise ValueError('Invalid bearer token')
+        self.device = self.store.setting('desktop-device')
+        if not self.device:
+            self.device = str(uuid.uuid4()); self.store.set_setting('desktop-device', self.device)
+        if not self.store.contexts(): self.store.create_context('Разговор')
+        self.providers = {}
+        for name, value in config['providers'].items():
+            if value['type'] == 'ollama': self.providers[name] = OllamaProvider(value['url'], value['model'])
+            elif value['type'] == 'codex': self.providers[name] = NativeCodexProvider(value['binary'], value['workspace'])
+            elif value['type'] == 'command': self.providers[name] = CommandProvider(value['argv'], value['label'],value.get('log_file'))
+            elif value['type'] == 'orchestrator': self.providers[name] = OrchestratorProvider(value)
+            elif value['type'] == 'cloud': self.providers[name] = CloudProvider(value)
+            else: raise ValueError('Unknown provider type')
+        self.coordinator = Coordinator(self.store, self.providers, self.coucou)
+        from hub_mobile import MobileLink
+        self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
+        self.lock = threading.RLock()
+        self.sessions, self.tickets = {}, {}
+        self.cached_status, self.status_at = {}, 0
+
+    def coucou(self, row, kind, data):
+        from coucou_events import wire_event, write_event, EVENTS
+        if kind=='assistant.message': self.mobile.deliver(row,data.get('text',''))
+        if kind not in EVENTS: return
+        sock = self.config.get('coucou_socket')
+        if not sock: return
+        event = {'version':1, 'deviceId':self.device, 'conversationId':row['id'], 'kind':kind}
+        if data.get('text'): event['text'] = data['text'][:4000]
+        if data.get('tool'): event['tool'] = data['tool']
+        success = write_event(sock, wire_event(event, 'assistant-desktop'))
+        self.store.event('coucou.delivery', row['context_id'], row['id'], delivered=success, hook=kind)
+
+    def statuses(self):
+        with self.lock:
+            if time.monotonic() - self.status_at > 10:
+                self.cached_status = {name: provider.status() for name,provider in self.providers.items()}
+                self.status_at = time.monotonic()
+            return self.cached_status
+
+    def client_focus(self, client):
+        focus = self.store.focus(client)
+        if focus['context_id'] is None:
+            try: focus = self.store.switch(client, self.store.setting('default-context',self.store.contexts()[0]['id']), focus['revision'])
+            except Conflict: focus = self.store.focus(client)
+        return focus
+
+    def session(self):
+        value = secrets.token_urlsafe(32)
+        with self.lock:
+            now = time.time()
+            self.sessions = {k:v for k,v in self.sessions.items() if v > now}
+            self.sessions[value] = now + 86400
+        return value
+
+
+class HubHandler(BaseHTTPRequestHandler):
+    server_version = 'AssistantHub/0.1'
+    protocol_version = 'HTTP/1.1'
+
+    @property
+    def app(self): return self.server.app
+
+    def log_message(self, *_): pass  # Never log URLs, prompts, tickets or headers.
+
+    def check_origin(self):
+        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        if self.headers.get('Host') not in allowed: raise PermissionError('Invalid host')
+        origin = self.headers.get('Origin')
+        if origin and origin not in {'http://' + h for h in allowed}: raise PermissionError('Invalid origin')
+
+    def authorized(self):
+        header = self.headers.get('Authorization', '')
+        if header.startswith('Bearer ') and secrets.compare_digest(header[7:], self.app.token): return True
+        try:
+            c = SimpleCookie(self.headers.get('Cookie','')); value = c.get('hub_session')
+            return bool(value and self.app.sessions.get(value.value,0) > time.time())
+        except Exception: return False
+
+    def body(self):
+        if self.headers.get('Transfer-Encoding'): raise ValueError('Chunked requests are unsupported')
+        length = int(self.headers.get('Content-Length','0'))
+        if not 0 < length <= 65536: raise ValueError('Invalid body size')
+        result = json.loads(self.rfile.read(length))
+        if not isinstance(result, dict): raise ValueError('Expected a JSON object')
+        return result
+
+    def reply(self, value, status=200, headers=None, mime='application/json; charset=utf-8'):
+        body = value if isinstance(value, bytes) else encoded(value).encode('utf-8')
+        self.send_response(status)
+        for key,val in {'Content-Type':mime, 'Content-Length':str(len(body)), 'Cache-Control':'no-store',
+                        'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer',
+                        'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+                        **(headers or {})}.items(): self.send_header(key,val)
+        self.end_headers(); self.wfile.write(body)
+
+    def do_GET(self): self.dispatch('GET')
+    def do_POST(self): self.dispatch('POST')
+
+    def dispatch(self, method):
+        try:
+            self.connection.settimeout(30)
+            self.check_origin()
+            url = urllib.parse.urlsplit(self.path)
+            path, query = url.path, urllib.parse.parse_qs(url.query)
+            get = lambda key, default=None: query.get(key,[default])[0]
+            if path in {'/','/app.js','/app.css'} and method == 'GET':
+                filename = {'/':'index.html','/app.js':'app.js','/app.css':'app.css'}[path]
+                mime = {'/':'text/html','/app.js':'text/javascript','/app.css':'text/css'}[path]
+                return self.reply((Path(__file__).parent/'hub_ui'/filename).read_bytes(), mime=mime+'; charset=utf-8')
+            if path == '/api/login' and method == 'POST':
+                body = self.body()
+                if not secrets.compare_digest(str(body.get('token','')),self.app.token): raise PermissionError('Неверный ключ Hub')
+                return self.reply({'ok':True},headers={'Set-Cookie':f'hub_session={self.app.session()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400'})
+            if path == '/ticket' and method == 'GET':
+                with self.app.lock: expiry = self.app.tickets.pop(get('id',''),0)
+                if expiry < time.time(): raise PermissionError('Ticket expired')
+                return self.reply(b'',303,{'Location':'/', 'Set-Cookie':f'hub_session={self.app.session()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400'})
+            coucou_access=False
+            prefix='/coucou/'+self.app.config.get('coucou_capability','unconfigured')
+            if path in {prefix+'/v1/models',prefix+'/v1/chat/completions'}:
+                # Original Coucou's local provider sends a fixed "Bearer ollama".
+                # A separate scoped URL capability exposes only the model facade.
+                coucou_access=bool(self.app.config.get('coucou_capability')) and self.headers.get('Authorization')=='Bearer ollama'
+                path=path[len(prefix):]
+            if not self.authorized() and not coucou_access: raise PermissionError('Нужен ключ доступа к Hub')
+            s = self.app.store
+            if path.startswith('/link/'):
+                return self.mobile_request(path,query,method)
+            if method == 'GET':
+                if path == '/health': return self.reply({'status':'ok','version':'0.1.0'})
+                if path == '/api/state':
+                    client = text(get('client','desktop'),128)
+                    focus = self.app.client_focus(client); context = focus['context_id']
+                    memory = s.memory_page(context,limit=12)
+                    return self.reply({'contexts':s.contexts(), 'focus':focus, 'providers':self.app.statuses(),
+                        'history':s.history(context), 'memory':memory['items'], 'memoryHasMore':memory['next'] is not None,
+                        'tasks':s.tasks(), 'chats':s.chats(),
+                        'notifications':s.notifications()[-60:], 'coucou':{'socketConfigured':bool(self.app.config.get('coucou_socket'))}})
+                if path == '/api/events': return self.reply(s.events(int(get('after','0')), get('context')))
+                if path == '/api/context': return self.reply(s.packet(uid(get('id')), int(get('budget','24000')),query=get('query')))
+                if path == '/api/memory':
+                    cursor = [get('after_scope'),get('after_key')] if get('after_scope') is not None else None
+                    return self.reply(s.memory_page(uid(get('context')),int(get('limit','50')),cursor))
+                if path == '/api/history': return self.reply(s.history(uid(get('context')), int(get('before')) if get('before') else None))
+                if path.startswith('/api/tasks/'): return self.reply(s.task(path.rsplit('/',1)[-1]))
+                if path == '/v1/models':
+                    return self.reply({'object':'list','data':
+                        [{'id':'assistant-'+p,'object':'model','owned_by':'assistant-hub'} for p in self.app.providers]+
+                        [{'id':f'hub/{p}/{c["id"]}','object':'model','owned_by':'assistant-hub'}
+                        for c in s.contexts() for p in self.app.providers]})
+            else:
+                body = self.body()
+                if path == '/api/tickets':
+                    with self.app.lock:
+                        self.app.tickets = {k:v for k,v in self.app.tickets.items() if v > time.time()}
+                        ticket = secrets.token_urlsafe(32); self.app.tickets[ticket] = time.time()+60
+                    return self.reply({'path':'/ticket?id='+ticket})
+                if path == '/api/contexts': return self.reply(s.create_context(body['title']),201)
+                if path == '/api/focus': return self.reply(s.switch(body['client'],body['context_id'],body['revision']))
+                if path == '/api/follow': return self.reply(s.follow_notification(body['client'],body['notification'],body['revision']))
+                if path == '/api/memory':
+                    value = s.put_memory(body['key'],body.get('body',''),'owner',body['revision'],body.get('context_id'),body.get('deleted',False))
+                    s.event('memory.changed',body.get('context_id'),None,key=value['key'],scope=value['scope'],revision=value['revision'])
+                    return self.reply(value)
+                if path == '/api/messages':
+                    row = self.app.coordinator.submit(body['context_id'],body['client'],body['provider'],body['prompt'],body['id'])
+                    return self.reply(row,202)
+                if path == '/api/cancel': return self.reply(self.app.coordinator.cancel(body['id']))
+                if path == '/api/tool':
+                    context = uid(body['context_id'])
+                    with s.connect() as db: s.require_context(db,context)
+                    row = {'id':uid(body['request_id']), 'context_id':context, 'client':text(body['client'],128), 'provider':'mcp'}
+                    if body.get('task_id'):
+                        parent = s.task(uid(body['task_id']))
+                        if parent['context_id'] != context:
+                            raise ValueError('Task belongs to another topic')
+                        row = parent
+                    # MCP tools expose no agent launching; task launches go through the task API.
+                    if body['name'] == 'agent_task': raise ValueError('Use the owned task API for agent launches')
+                    return self.reply(self.app.coordinator.call_tool(body['name'],body['arguments'],row))
+                if path == '/api/notify': return self.reply(s.notify(body['context_id'],text(body['source'],256),body['body']))
+                if path == '/v1/chat/completions': return self.completion(body)
+                if path == '/conversation': return self.reply(self.app.mobile.turn(body))
+            self.reply({'error':'Unknown endpoint'},404)
+        except Conflict as error: self.reply({'error':str(error)},409)
+        except PermissionError as error: self.reply({'error':str(error)},401)
+        except (ValueError, KeyError, TypeError) as error: self.reply({'error':str(error)[:500]},400)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError): pass
+        except Exception: self.reply({'error':'Hub request failed; inspect the local runtime'},500)
+
+    def mobile_request(self,path,query,method):
+        from home_link import MAX_IMAGE,MAX_SNAPSHOT,RevisionConflict
+        parts=path.split('/');device=uid(parts[2]);route=parts[3:];link=self.app.mobile.link
+        try:
+            if method=='GET':
+                if route==['knowledge']:return self.reply(link.knowledge(device))
+                if route==['events']:
+                    after=int(query.get('after',['0'])[0]);wait=int(query.get('wait',['0'])[0])
+                    return self.reply(link.events(device,after,wait))
+                if len(route)==2 and route[0]=='image':return self.reply(link.image(device,route[1]),mime='application/octet-stream')
+            else:
+                size=int(self.headers.get('Content-Length','0'));image=len(route)==2 and route[0]=='image'
+                if self.headers.get('Transfer-Encoding') or not 0<size<=(MAX_IMAGE if image else MAX_SNAPSHOT if route==['knowledge'] else 16384):raise ValueError('Invalid link size')
+                raw=self.rfile.read(size)
+                if len(raw)!=size:raise ValueError('Incomplete request')
+                if image:return self.reply(link.image(device,route[1],raw))
+                body=json.loads(raw)
+                if route==['knowledge']:return self.reply(self.app.mobile.sync(device,body))
+                if route==['events']:return self.reply(link.publish(device,body))
+                if route==['ack'] and set(body)=={'through'}:return self.reply(link.ack(device,body['through']))
+            self.reply({'error':'Unknown link endpoint'},404)
+        except RevisionConflict as error:self.reply({'error':'revision_conflict','revision':error.revision},409)
+        except KeyError:self.reply({'error':'Unknown paired source/device'},404)
+
+    def completion(self, body):
+        parts = body.get('model','').split('/')
+        if body.get('model','').startswith('assistant-'):
+            provider=body['model'].removeprefix('assistant-');context=self.app.client_focus('coucou')['context_id']
+        elif len(parts)==3 and parts[0]=='hub':provider,context=parts[1],uid(parts[2])
+        else: raise ValueError('Choose an assistant-provider or hub/provider/topic model from /v1/models')
+        history = body.get('messages', [])
+        if not history or history[-1].get('role') != 'user' or not isinstance(history[-1].get('content'),str):
+            raise ValueError('The last message must contain user text')
+        task_id = self.headers.get('X-Request-ID') or str(uuid.uuid4())
+        row = self.app.coordinator.submit(context,'coucou',provider,history[-1]['content'],uid(task_id))
+        stream = body.get('stream',False)
+        if stream:
+            self.send_response(200)
+            for k,v in {'Content-Type':'text/event-stream', 'Cache-Control':'no-store', 'Connection':'close'}.items(): self.send_header(k,v)
+            self.end_headers(); self.close_connection=True
+        deadline, sent = time.monotonic()+260, ''
+        while time.monotonic()<deadline:
+            row = self.app.store.task(row['id'])
+            if stream and row['output'].startswith(sent) and row['output'] != sent:
+                value = {'id':row['id'],'object':'chat.completion.chunk','choices':[{'index':0,'delta':{'content':row['output'][len(sent):]},'finish_reason':None}]}
+                self.wfile.write(('data: '+encoded(value)+'\n\n').encode()); self.wfile.flush(); sent=row['output']
+            if row['status'] in TERMINAL: break
+            if stream: self.wfile.write(b': waiting\n\n'); self.wfile.flush()
+            time.sleep(0.2)
+        content = row['output'] if row['status'] == 'completed' else row['error'] or 'Превышено время ожидания. Статус задачи доступен в Hub.'
+        if stream:
+            remainder = content[len(sent):] if content.startswith(sent) else '\n'+content
+            value = {'id':row['id'],'object':'chat.completion.chunk','choices':[{'index':0,'delta':{'content':remainder},'finish_reason':'stop'}]}
+            self.wfile.write(('data: '+encoded(value)+'\n\ndata: [DONE]\n\n').encode()); self.wfile.flush()
+        else:
+            self.reply({'id':row['id'],'object':'chat.completion','model':body['model'],
+                        'choices':[{'index':0,'message':{'role':'assistant','content':content},'finish_reason':'stop'}]})
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('--config',required=True)
+    args = parser.parse_args()
+    config = private_json(args.config)
+    # Loopback only in this local assembly. LAN deployment is a separate explicit step.
+    if config.get('host','127.0.0.1') != '127.0.0.1': raise ValueError('Local Hub binds loopback only')
+    os.umask(0o077)
+    app = HubApplication(config)
+    server = ThreadingHTTPServer(('127.0.0.1',config.get('port',8778)),HubHandler); server.app = app
+    server.daemon_threads = True
+    print('Assistant Hub ready on http://127.0.0.1:'+str(server.server_port),flush=True)
+    import signal
+    def shutdown(*_):
+        for row in app.store.tasks():
+            if row['status'] not in TERMINAL: app.coordinator.cancel(row['id'])
+        threading.Thread(target=server.shutdown,daemon=True).start()
+    signal.signal(signal.SIGTERM,shutdown)
+    try: server.serve_forever()
+    finally:
+        server.server_close()
+        deadline=time.monotonic()+4
+        while app.coordinator.active and time.monotonic()<deadline:time.sleep(.05)
+
+
+if __name__ == '__main__': main()

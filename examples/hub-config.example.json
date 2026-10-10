@@ -1,0 +1,20 @@
+{
+  "host": "127.0.0.1",
+  "port": 8778,
+  "state": "/absolute/private/runtime/state",
+  "token_file": "/absolute/private/runtime/token",
+  "providers": {
+    "ollama": {
+      "type": "ollama",
+      "url": "http://127.0.0.1:11434",
+      "model": "qwen3:4b-instruct-2507-q4_K_M"
+    },
+    "openai": {
+      "type": "cloud",
+      "protocol": "openai",
+      "url": "https://api.openai.com/v1",
+      "model": "",
+      "key_env": "OPENAI_API_KEY"
+    }
+  }
+}

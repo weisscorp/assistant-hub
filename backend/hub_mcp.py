@@ -1,4 +1,4 @@
-"""Shared Hub memory MCP. Explicit topic binding; authenticated HTTP transport."""
+"""Shared Hub memory and capabilities MCP with an explicit topic binding."""
 import argparse
 import asyncio
 import json
@@ -15,18 +15,26 @@ def create_server(url, token_file, context, client, task_id=None):
     from mcp.types import Tool, ToolAnnotations, CallToolResult, TextContent
     uid(context)
     if task_id is not None: uid(task_id)
-    server = Server('assistant-hub-memory', version='0.1.0')
+    server = Server('assistant-hub-memory', version='0.2.0')
     definitions = [t['function'] for t in TOOLS if t['function']['name'] not in {'agent_task','context_switch'}]
 
     @server.list_tools()
     async def list_tools():
+        nonlocal definitions
+        if task_id:
+            token=Path(token_file).read_text().strip()
+            catalog=await asyncio.to_thread(request_json,url.rstrip('/')+'/api/tools?task='+task_id+'&context='+context,
+                headers={'Authorization':'Bearer '+token})
+            definitions=[t['function'] for t in catalog if t['function']['name'] not in {'agent_task','context_switch'}]
         return [Tool(name=t['name'],description=t['description'],inputSchema=t['parameters'],
-            annotations=ToolAnnotations(readOnlyHint=t['name'] in {'memory_read','contexts_list','task_status'},
-                                        destructiveHint=False,openWorldHint=False)) for t in definitions]
+            annotations=ToolAnnotations(readOnlyHint=t['name'] in {'memory_read','contexts_list','task_status','agents_list','capabilities_list','capability_result'},
+                                        destructiveHint=t['name'] == 'capability_call' or t['name'].startswith('node_'),openWorldHint=False)) for t in definitions]
 
     @server.call_tool()
     async def call_tool(name, arguments):
         try:
+            if task_id and name.startswith('node_'):
+                await list_tools()
             if name not in {t['name'] for t in definitions}: raise ValueError('Unknown tool')
             token = Path(token_file).read_text().strip()
             value = await asyncio.to_thread(request_json, url.rstrip('/')+'/api/tool',

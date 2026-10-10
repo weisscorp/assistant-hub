@@ -1,4 +1,4 @@
-"""Run official Hermes against local Ollama with only shared-memory MCP tools."""
+"""Run official Hermes against local Ollama with the explicit Hub MCP tool catalog."""
 import argparse
 import asyncio
 import contextlib

@@ -2,7 +2,7 @@
 
 A local, self-hosted coordinator for a personal assistant across desktop agents
 and an Android companion. The Hub owns conversation topics, shared memory,
-history, task state and notifications. Models and agent runtimes are adapters.
+history, task state, node capabilities and notifications. Models and agent runtimes are adapters.
 
 [Русский](README.ru.md) · [Android companion](https://github.com/weisscorp/android-assistant)
 
@@ -17,11 +17,15 @@ flowchart LR
     Hub --> Hermes[Hermes + Hub MCP]
     Hub --> AO[Agent Orchestrator workers]
     Hub --> Cloud[Optional cloud APIs]
+    Node[Computer / server action worker] <-->|Outbound claim + acknowledgement| Hub
 ```
 
 ## What works
 
 - Authenticated loopback HTTP API and browser UI; separate topics and focus per client.
+- Shared node capability discovery and durable action queue with executor acknowledgements.
+- Persistent Hub timers and topic notifications, accessible through the same model tools.
+- Optional computer worker and explicit private LAN/VPN listener address.
 - Durable task queue: serial within a topic, concurrent across topics, cancellation,
   idempotent request IDs, and explicit unknown outcomes after a restart.
 - Shared facts with revisions, topic-local facts, paginated history and agent session references.
@@ -39,7 +43,8 @@ flowchart LR
 This is an early development release. It does not yet provide unrestricted control
 of a device fleet, automatic ingestion of every existing agent chat, or a complete
 server-to-phone tool execution loop. Android needs an authenticated HTTPS gateway;
-the local Hub deliberately binds only to loopback. See [architecture and limits](docs/architecture.md).
+the Hub defaults to loopback and can explicitly bind a private/VPN interface.
+See [architecture and limits](docs/architecture.md).
 
 ## Quick start
 
@@ -71,6 +76,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 
 - [Coucou, Codex, Hermes, Agent Orchestrator and cloud setup](docs/integrations.md)
 - [Shared memory, indexed search and history](docs/memory.md)
+- [Connected nodes, actions, timers and VPN transport](docs/capabilities.md)
 - [Android connection contract and current gaps](docs/android.md)
 - [API and extending providers](docs/api.md)
 - [Security, private state and backups](SECURITY.md)

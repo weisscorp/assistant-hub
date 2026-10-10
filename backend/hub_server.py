@@ -1,4 +1,4 @@
-"""Authenticated loopback HTTP facade for the local cross-device assistant."""
+"""Authenticated local/VPN HTTP facade for the cross-device assistant."""
 import argparse
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import stat
 import threading
 import time
@@ -14,6 +15,7 @@ import uuid
 from agent_hub import Conflict, encoded, uid, text
 from hub_runtime import Coordinator, RuntimeStore, TERMINAL
 from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
+from hub_network import bind_ip, authority
 
 
 def private_json(path):
@@ -47,6 +49,7 @@ class HubApplication:
             elif value['type'] == 'cloud': self.providers[name] = CloudProvider(value)
             else: raise ValueError('Unknown provider type')
         self.coordinator = Coordinator(self.store, self.providers, self.coucou)
+        self.fabric = self.coordinator.fabric
         from hub_mobile import MobileLink
         self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
         self.lock = threading.RLock()
@@ -98,7 +101,10 @@ class HubHandler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass  # Never log URLs, prompts, tickets or headers.
 
     def check_origin(self):
-        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        host = self.server.server_address[0]
+        allowed = {authority(host, self.server.server_port)}
+        if bind_ip(host).is_loopback:
+            allowed.add(f'localhost:{self.server.server_port}')
         if self.headers.get('Host') not in allowed: raise PermissionError('Invalid host')
         origin = self.headers.get('Origin')
         if origin and origin not in {'http://' + h for h in allowed}: raise PermissionError('Invalid origin')
@@ -170,6 +176,8 @@ class HubHandler(BaseHTTPRequestHandler):
                     return self.reply({'contexts':s.contexts(), 'focus':focus, 'providers':self.app.statuses(),
                         'history':s.history(context), 'memory':memory['items'], 'memoryHasMore':memory['next'] is not None,
                         'tasks':s.tasks(), 'chats':s.chats(),
+                        'nodes':self.app.fabric.nodes(), 'timers':self.app.fabric.timers(context),
+                        'calls':[{k:c[k] for k in ('id','node_id','capability','status','error')} for c in self.app.fabric.calls(context)],
                         'notifications':s.notifications()[-60:], 'coucou':{'socketConfigured':bool(self.app.config.get('coucou_socket'))}})
                 if path == '/api/events': return self.reply(s.events(int(get('after','0')), get('context')))
                 if path == '/api/context': return self.reply(s.packet(uid(get('id')), int(get('budget','24000')),query=get('query')))
@@ -177,6 +185,14 @@ class HubHandler(BaseHTTPRequestHandler):
                     cursor = [get('after_scope'),get('after_key')] if get('after_scope') is not None else None
                     return self.reply(s.memory_page(uid(get('context')),int(get('limit','50')),cursor))
                 if path == '/api/history': return self.reply(s.history(uid(get('context')), int(get('before')) if get('before') else None))
+                if path == '/api/nodes':return self.reply(self.app.fabric.nodes(get('query',''),schemas=get('schemas')=='1'))
+                if path == '/api/tools':
+                    row = s.task(uid(get('task')))
+                    if row['context_id'] != uid(get('context')):raise ValueError('Task belongs to another topic')
+                    return self.reply(self.app.coordinator.model_tools(row))
+                if path.startswith('/api/capabilities/calls/'):
+                    return self.reply(self.app.fabric.result(path.rsplit('/',1)[1],uid(get('context'))))
+                if path == '/api/timers':return self.reply(self.app.fabric.timers(uid(get('context'))))
                 if path.startswith('/api/tasks/'): return self.reply(s.task(path.rsplit('/',1)[-1]))
                 if path == '/v1/models':
                     return self.reply({'object':'list','data':
@@ -200,6 +216,15 @@ class HubHandler(BaseHTTPRequestHandler):
                 if path == '/api/messages':
                     row = self.app.coordinator.submit(body['context_id'],body['client'],body['provider'],body['prompt'],body['id'])
                     return self.reply(row,202)
+                if path == '/api/nodes':
+                    return self.reply(self.app.fabric.register(body['id'],body['label'],body['kind'],body['capabilities'],body.get('ttl',90)),201)
+                if path.startswith('/api/nodes/'):
+                    parts=path.split('/')
+                    if len(parts)==5 and parts[4]=='claim':return self.reply(self.app.fabric.claim(parts[3]))
+                    if len(parts)==5 and parts[4]=='result':
+                        return self.reply(self.app.fabric.complete(parts[3],body['id'],body['lease'],body.get('result'),body.get('error','')))
+                if path == '/api/capabilities/call':
+                    return self.reply(self.app.fabric.call(body['node'],body['capability'],body['arguments'],body['context_id'],body['client'],body['id']),202)
                 if path == '/api/cancel': return self.reply(self.app.coordinator.cancel(body['id']))
                 if path == '/api/tool':
                     context = uid(body['context_id'])
@@ -286,13 +311,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('--config',required=True)
     args = parser.parse_args()
     config = private_json(args.config)
-    # Loopback only in this local assembly. LAN deployment is a separate explicit step.
-    if config.get('host','127.0.0.1') != '127.0.0.1': raise ValueError('Local Hub binds loopback only')
+    host = bind_ip(config.get('host','127.0.0.1'))
     os.umask(0o077)
     app = HubApplication(config)
-    server = ThreadingHTTPServer(('127.0.0.1',config.get('port',8778)),HubHandler); server.app = app
+    app.fabric.start()
+    server_type = ThreadingHTTPServer
+    if host.version == 6:
+        class IPv6Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+        server_type = IPv6Server
+    server = server_type((str(host),config.get('port',8778)),HubHandler); server.app = app
     server.daemon_threads = True
-    print('Assistant Hub ready on http://127.0.0.1:'+str(server.server_port),flush=True)
+    print('Assistant Hub ready on http://'+authority(str(host),server.server_port),flush=True)
     import signal
     def shutdown(*_):
         for row in app.store.tasks():
@@ -301,6 +331,7 @@ def main():
     signal.signal(signal.SIGTERM,shutdown)
     try: server.serve_forever()
     finally:
+        app.fabric.close()
         server.server_close()
         deadline=time.monotonic()+4
         while app.coordinator.active and time.monotonic()<deadline:time.sleep(.05)

@@ -1,5 +1,7 @@
 """Durable local coordinator: task ownership, event replay and shared memory tools."""
 import json
+import hashlib
+import re
 import threading
 import time
 import uuid
@@ -25,12 +27,19 @@ TOOLS = [
     schema('contexts_list', 'List conversation topics to resolve an explicit request to switch topic.', {}, []),
     schema('context_switch', 'Switch only the requesting client to a topic the user selected. Use exact topic ID from contexts_list.',
            {'context_id': STRING}, ['context_id']),
-    schema('agent_task', 'Start an independent Codex or Hermes task for an explicit user request. Return task ID; completion arrives as a notification. Never claim it finished before checking.',
-           {'agent': {'type': 'string', 'enum': ['codex', 'hermes']}, 'prompt': STRING}, ['agent', 'prompt']),
+    schema('agents_list', 'List configured model/agent provider IDs before delegating. Configuration does not guarantee runtime availability.', {}, []),
+    schema('agent_task', 'Start a task on an agent/provider ID from agents_list for an explicit user request. Return task ID; completion arrives later. Never claim it finished before checking.',
+           {'agent': STRING, 'prompt': STRING}, ['agent', 'prompt']),
     schema('task_status', 'Read task status and its actual result, including errors.', {'task_id': STRING}, ['task_id']),
     schema('notify', 'Publish a notification attached to the current topic. Does not switch any client.', {'body': STRING}, ['body']),
     schema('phone_knowledge', 'Read synced Android knowledge using device/source UUIDs from shared-memory references. Empty source lists sources. Observations have timestamps and are not live locations.',
            {'device':STRING,'source':STRING},['device','source']),
+    schema('capabilities_list', 'Discover connected nodes and their action schemas by node ID/label or capability name/description. Search timer to find Hub timer.create/list/cancel. If a keyword search is empty, try query="" before saying unavailable. Empty query lists a bounded catalog. Offline nodes can queue commands but cannot confirm execution.',
+           {'query': STRING}, ['query']),
+    schema('capability_call', 'Invoke an advertised node action. arguments_json is a JSON object encoded as a string, following the discovered input schema; for timer.create use e.g. {"duration_seconds":300,"label":"Timer"}. Use a stable request_key per action in this user request, reused on retry. Only status=succeeded confirms execution; queued/running means waiting for executor. Hub timers notify in Hub, not as phone alarms.',
+           {'node': STRING, 'capability': STRING, 'arguments_json': STRING, 'request_key':STRING},
+           ['node','capability','arguments_json','request_key']),
+    schema('capability_result', 'Read the actual executor acknowledgement/status of a node call in this topic.', {'call_id': STRING}, ['call_id']),
 ]
 
 
@@ -165,6 +174,8 @@ class RuntimeStore(HubStore):
 class Coordinator:
     def __init__(self, store, providers, event_sink=None):
         self.store, self.providers, self.event_sink = store, providers, event_sink
+        from hub_fabric import Fabric
+        self.fabric = Fabric(store)
         self.lock = threading.RLock()
         self.active = {}
         self.context_locks = {}
@@ -183,6 +194,7 @@ class Coordinator:
         row = self.store.task(task_id)
         with self.lock:
             if task_id in self.active: self.active[task_id].set()
+        self.fabric.cancel_task(task_id)
         return self.store.update(task_id, 'cancelled', error='Запрос остановлен пользователем.')
 
     def emit(self, row, kind, **data):
@@ -192,10 +204,50 @@ class Coordinator:
             except (OSError, ValueError): pass
 
     def context_packet(self, row, budget=24000):
-        packet = self.store.packet(row['context_id'], budget, query=row['prompt'])
+        hints = self.fabric.hints(row['prompt']) if budget >= 4096 else None
+        reserved = len(encoded(hints).encode())+32 if hints is not None else 0
+        packet = self.store.packet(row['context_id'], budget-reserved, query=row['prompt'])
+        if hints is not None:
+            packet['node_hints'] = hints
+        current_entries = []
+        for entry in packet['entries']:
+            if entry['role'] == 'tool':
+                try:record=json.loads(entry['body'])
+                except ValueError:record=None
+                if isinstance(record,dict) and record.get('name') == 'capabilities_list':
+                    packet['omitted']['entries'] += 1
+                    continue
+            current_entries.append(entry)
+        packet['entries'] = current_entries
         self.emit(row, 'memory.retrieved', **packet['retrieval'],
                   facts=[{'scope':m['scope'],'key':m['key'],'revision':m['revision']} for m in packet['memory']])
         return packet
+
+    def node_tools(self, row):
+        """Expose a small set of ordinary typed tools for explicitly named nodes."""
+        prompt = row.get('prompt','').casefold()
+        result, size = {}, 0
+        for node in self.fabric.hints(prompt):
+            if node['id'].casefold() not in prompt and node['label'].casefold() not in prompt:
+                continue
+            catalog = self.fabric.nodes(node['id'],schemas=True)
+            for item in catalog:
+                if item['id'] != node['id']:
+                    continue
+                for action in item['capabilities']:
+                    digest=hashlib.sha256((node['id']+':'+action['name']).encode()).hexdigest()[:8]
+                    name='node_'+re.sub(r'[^a-z0-9_]','_',node['id'])[:20]+'_'+re.sub(r'[^a-z0-9_]','_',action['name'])[:20]+'_'+digest
+                    parameters=json.loads(encoded(action['inputSchema']))
+                    parameters['properties']['_request_key']={'type':'string','description':'Optional stable key. Reuse on retry; change for a distinct action in this request.'}
+                    definition={'type':'function','function':{'name':name,'description':'On node '+node['id']+': '+action['description'],'parameters':parameters}}
+                    cost=len(encoded(definition).encode())
+                    if cost+size > 10000 or len(result)>=6:
+                        return result
+                    result[name]=(definition,node['id'],action['name']);size+=cost
+        return result
+
+    def model_tools(self, row):
+        return TOOLS+[item[0] for item in self.node_tools(row).values()]
 
     def _run(self, row, stop):
         with self.lock: context_lock = self.context_locks.setdefault(row['context_id'], threading.Lock())
@@ -232,6 +284,12 @@ class Coordinator:
 
     def call_tool(self, name, arguments, row, stop=None):
         if stop and stop.is_set(): raise InterruptedError('cancelled')
+        if isinstance(name,str) and name.startswith('node_'):
+            action=self.node_tools(row).get(name)
+            if action is None or not isinstance(arguments,dict):raise ValueError('Unknown node tool')
+            payload=dict(arguments);request_key=payload.pop('_request_key',name)
+            return self.call_tool('capability_call',{'node':action[1],'capability':action[2],
+                'arguments_json':encoded(payload),'request_key':request_key},row,stop)
         definitions = {t['function']['name']: t['function']['parameters'] for t in TOOLS}
         if name not in definitions or not isinstance(arguments, dict): raise ValueError('Unknown tool')
         fields = definitions[name]
@@ -241,6 +299,7 @@ class Coordinator:
             if spec['type'] == 'string': text(value, 8000, empty=key in {'query','source'})
             elif spec['type'] == 'boolean' and type(value) is not bool: raise ValueError('Expected boolean')
             elif spec['type'] == 'integer': number(value, 0, 2**53-1)
+            elif spec['type'] == 'object' and not isinstance(value,dict): raise ValueError('Expected object')
             if 'enum' in spec and value not in spec['enum']: raise ValueError('Invalid enum')
         self.emit(row, 'tool.started', tool=name, text=encoded(arguments))
         s, context = self.store, row['context_id']
@@ -259,11 +318,26 @@ class Coordinator:
                 s.event('focus.changed', result['context_id'], row['id'], **result)
             elif name == 'agent_task':
                 result = self.submit(context, row['client'], arguments['agent'], arguments['prompt'])
+            elif name == 'agents_list':result = [{'id':k,'adapter':v.__class__.__name__} for k,v in self.providers.items()]
+            elif name == 'capabilities_list':result = self.fabric.nodes(arguments['query'],schemas=True)
+            elif name == 'capability_call':
+                call_id = str(uuid.uuid5(uuid.NAMESPACE_URL,row['id']+':'+arguments['request_key']))
+                action_arguments = json.loads(arguments['arguments_json'])
+                result = self.fabric.call(arguments['node'],arguments['capability'],action_arguments,
+                                          context,row['client'],call_id,row['id'])
+                deadline = time.monotonic()+2
+                while result['status'] not in {'succeeded','failed','cancelled','unknown'} and time.monotonic()<deadline:
+                    if stop and stop.wait(.1):raise InterruptedError('cancelled')
+                    if not stop:time.sleep(.1)
+                    result = self.fabric.result(call_id,context)
+            elif name == 'capability_result':result = self.fabric.result(arguments['call_id'],context)
             elif name == 'task_status':
                 result = s.task(uid(arguments['task_id']))
                 if result['context_id'] != context: raise ValueError('Task belongs to another topic')
             elif name == 'phone_knowledge':result = s.mobile_link.knowledge(arguments['device'],arguments['source'])
             else: result = s.notify(context, row['provider'], arguments['body'])
+            if name in {'capability_call','capability_result'}:
+                result = {key:result[key] for key in ('id','node_id','capability','status','result','error')}
             body = encoded(result)
             if len(body) > 18000: body = encoded({'truncated': True, 'items': result[:12]}) if isinstance(result, list) else encoded({'error': 'Result exceeds tool budget'})
             record = {'name': name, 'arguments': arguments, 'result': json.loads(body)}

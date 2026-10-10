@@ -17,6 +17,8 @@ import webbrowser
 PROJECT=Path(__file__).resolve().parent.parent
 BACKEND=PROJECT/'backend'
 DEFAULT=Path.home()/'.local/share/assistant-stack'
+sys.path.insert(0,str(BACKEND))
+from hub_network import hub_url
 
 
 def write_private(path,value):
@@ -42,24 +44,26 @@ def configure(args):
     if binary and 'codex' not in config['providers']:
         config['providers']['codex']={'type':'codex','binary':binary,'workspace':str(root/'agents/codex')}
     config.setdefault('coucou_capability',secrets.token_urlsafe(32))
+    if args.local_node:
+        config['local_node'] = True
     config['providers'].setdefault('openai',{'type':'cloud','protocol':'openai','url':'https://api.openai.com/v1',
         'model':os.environ.get('OPENAI_MODEL',''),'key_env':'OPENAI_API_KEY'})
     config['providers'].setdefault('anthropic',{'type':'cloud','protocol':'anthropic','url':'https://api.anthropic.com/v1',
         'model':os.environ.get('ANTHROPIC_MODEL',''),'key_env':'ANTHROPIC_API_KEY'})
     if (root/'runtime/ao').exists():
         config['providers']['orchestrator']={'type':'orchestrator','url':'http://127.0.0.1:3001',
-            'hub_url':'http://127.0.0.1:'+str(config['port']),'token_file':str(root/'token'),
+            'hub_url':hub_url(config),'token_file':str(root/'token'),
             'mcp_python':str(PROJECT/'verification/home-mcp-venv/bin/python'),'mcp_client':str(BACKEND/'hub_mcp_client.py')}
     if args.hermes_root and args.hermes_python:
         hermes_root=args.hermes_root.resolve(strict=True); python=args.hermes_python.absolute()
         revision=subprocess.check_output(['git','-C',str(hermes_root),'rev-parse','HEAD'],text=True).strip()
         hermes={'root':str(hermes_root),'revision':revision,'home':str(root/'hermes-home'),
                 'workspace':str(root/'agents/hermes'),'model':config['providers']['ollama']['model'],
-                'base_url':config['providers']['ollama']['url']+'/v1','hub_url':'http://127.0.0.1:'+str(config['port']),
+                'base_url':config['providers']['ollama']['url']+'/v1','hub_url':hub_url(config),
                 'token_file':str(root/'token'),'mcp_script':str(BACKEND/'hub_mcp.py'),
                 'mcp_python':str(PROJECT/'verification/home-mcp-venv/bin/python')}
         write_private(root/'hermes.json',json.dumps(hermes,indent=2))
-        # Six explicit Hub tools do not need Hermes' progressive tool-search layer.
+        # The bounded Hub tool catalog does not need progressive tool search.
         # Keep unrelated settings in this isolated profile intact.
         subprocess.run([str(python),'-c',
             'from pathlib import Path; from ruamel.yaml import YAML; import sys; '
@@ -76,7 +80,7 @@ def configure(args):
 
 def hub_request(root,path,body=None):
     config=json.loads((root/'config.json').read_text()); token=(root/'token').read_text().strip()
-    request=urllib.request.Request('http://127.0.0.1:'+str(config['port'])+path,
+    request=urllib.request.Request(hub_url(config)+path,
         data=json.dumps(body).encode() if body is not None else None,
         headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
     with urllib.request.urlopen(request,timeout=15) as response:return json.load(response)
@@ -139,6 +143,10 @@ def start(root):
     while time.monotonic()<deadline:
         try:
             value=hub_request(root,'/health')
+            if config.get('local_node'):
+                launch(root,'local-node',[sys.executable,str(BACKEND/'hub_node.py'),
+                    '--url',hub_url(config),'--token-file',str(root/'token'),
+                    '--id','local-host','--label','Local computer','--kind','computer'])
             coucou=Path(config.get('coucou_app',str(root/'runtime/coucou/Coucou.app')))/'Contents/MacOS/Coucou'
             if sys.platform=='darwin' and coucou.exists() and not live(root,'coucou'):
                 # Do not duplicate or take ownership of an already running GUI app.
@@ -146,7 +154,7 @@ def start(root):
                 if running.returncode!=0:
                     domain='fr.louisraille.NotchBuddy'
                     values={'soundEnabled':False,'chatProvider':'ollama','ollamaChatModel':'assistant-ollama',
-                            'ollamaServerURL':'http://127.0.0.1:'+str(config['port'])+'/coucou/'+config['coucou_capability']}
+                            'ollamaServerURL':hub_url(config)+'/coucou/'+config['coucou_capability']}
                     for key,item in values.items():
                         subprocess.run(['defaults','write',domain,key,'-bool' if type(item) is bool else '-string',
                                         'false' if item is False else item],check=True,stdout=subprocess.DEVNULL)
@@ -157,7 +165,7 @@ def start(root):
 
 
 def stop(root):
-    for name in ('hub','ao','coucou'):
+    for name in ('local-node','hub','ao','coucou'):
         if live(root,name):
             saved=json.loads((root/(name+'.pid.json')).read_text());os.killpg(saved['pid'],signal.SIGTERM)
             deadline=time.monotonic()+8
@@ -171,6 +179,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--directory',type=Path,default=DEFAULT)
     sub=p.add_subparsers(dest='command',required=True)
     setup=sub.add_parser('setup');setup.add_argument('--hermes-root',type=Path);setup.add_argument('--hermes-python',type=Path)
+    setup.add_argument('--local-node',action='store_true',help='Enable a local node with read-only system.info/system.time')
     for name in ('start','stop','status','open','coucou-url'):sub.add_parser(name)
     ask=sub.add_parser('ask');ask.add_argument('prompt');ask.add_argument('--provider',default='ollama');ask.add_argument('--context')
     args=p.parse_args();root=args.directory.absolute()
@@ -185,11 +194,11 @@ def main():
     elif args.command=='coucou-url':
         # Display only on an explicit owner request, never in startup/status logs.
         config=json.loads((root/'config.json').read_text())
-        print('http://127.0.0.1:'+str(config['port'])+'/coucou/'+config['coucou_capability'])
+        print(hub_url(config)+'/coucou/'+config['coucou_capability'])
     elif args.command=='open':
         ticket=hub_request(root,'/api/tickets',{})
         config=json.loads((root/'config.json').read_text())
-        webbrowser.open('http://127.0.0.1:'+str(config['port'])+ticket['path'])
+        webbrowser.open(hub_url(config)+ticket['path'])
         print('Opened Assistant Hub')
     else:
         info=hub_request(root,'/api/state?client=console');context=args.context or info['focus']['context_id']

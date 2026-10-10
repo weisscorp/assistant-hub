@@ -63,9 +63,14 @@ python3 tools/local_stack.py ask --provider hermes 'Прочитай досту�
 
 The launcher pins the current Git revision, creates a separate `HERMES_HOME`,
 uses the configured local Ollama endpoint, and disables progressive tool search
-only in this isolated profile. The adapter exposes six Hub tools directly and
+only in this isolated profile. The adapter exposes the bounded Hub MCP catalog directly and
 checks the exact tool set. Terminal/file/device toolsets are not enabled by this
 adapter. An upstream change requires revalidation and a new `setup`.
+
+This catalog includes shared node discovery, action calls and call results;
+Hermes can use the same timer and registered device capabilities as other
+providers. MCP does not enable arbitrary shell/device tools. Connect real
+executors using the [node protocol](capabilities.md).
 
 For another trusted MCP client, run the stdio server with its assigned topic:
 

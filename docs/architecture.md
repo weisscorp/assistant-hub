@@ -10,12 +10,14 @@ with the read-only bridge, or create a new Hub conversation.
 
 | Layer | Implementation | Boundary |
 |---|---|---|
-| UI / API | `hub_server.py`, `hub_ui/` | Loopback, bearer auth or browser login ticket |
+| UI / API | `hub_server.py`, `hub_ui/` | Loopback default or explicit private/VPN interface, owner auth |
 | Coordination | `hub_runtime.py` | Per-topic serial queue, cross-topic concurrency |
 | Persistence | `agent_hub.py`, SQLite WAL | History, revisions, client focus, chats, notifications |
 | Retrieval | `knowledge_search.py`, SQLite FTS5 | Lexical recall, bounded prompt memory |
 | Providers | `hub_providers.py` | Ollama, Codex, command/Hermes, AO, cloud |
 | Agent tools | `hub_mcp.py`, `hub_mcp_client.py` | Scoped topic and optional parent task |
+| Node actions | `hub_fabric.py`, `hub_node.py` | Advertised schemas, atomic claims, actual acknowledgements |
+| Timers | `hub_fabric.py` | Indexed deadlines, persistent topic notifications |
 | Mobile | `hub_mobile.py`, `home_link.py` | Snapshot sync and polling inbox |
 | Desktop mascot | `coucou_events.py` | Original Coucou socket, no copied mascot assets |
 
@@ -30,8 +32,10 @@ with the read-only bridge, or create a new Hub conversation.
 7. Clients consume events/history; paired phones may receive an inbox message.
 
 A notification does not silently switch every client's topic. Following one
-updates only the requesting client's focus. `agent_task` delegates to Codex or
-Hermes for an explicit user request; provider selection is otherwise explicit.
+updates only the requesting client's focus. `agent_task` delegates to a configured
+provider for an explicit user request; provider selection is otherwise explicit.
+Node workers connect outward and share the action broker, not a model-specific
+tool implementation. See [capabilities and network transport](capabilities.md).
 
 ## Recovery and cancellation
 
@@ -49,7 +53,7 @@ have not been used for validation. Coucou's model API and socket event delivery
 are integrated; every visual animation/approval path is not verified.
 
 The Android repository has local voice/tools, knowledge and inbox clients. A
-TLS gateway, complete bidirectional phone action loop, fleet-level capabilities,
+TLS gateway, complete bidirectional phone action loop, application-specific fleet handlers,
 Home Assistant/Yandex integrations, Slack/mail ingestion, OTA automation and
 Android mascot reuse are future work. Neither this repository nor its launcher
 opens a running service to the Internet.

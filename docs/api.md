@@ -14,6 +14,14 @@ Host/Origin checks reject arbitrary origins. This is a single-owner local API.
 | POST `/api/messages` | UUID `id`, `context_id`, `client`, `provider`, `prompt` |
 | GET `/api/tasks/UUID` | Durable task state/output/error |
 | POST `/api/cancel` | Cancel task `id` |
+| GET `/api/nodes?query=TEXT&schemas=1` | Nodes and bounded advertised schemas |
+| GET `/api/tools?task=UUID&context=UUID` | Task-bound generic and typed node tools |
+| POST `/api/nodes` | Register `id`, `label`, `kind`, `capabilities`, optional `ttl` |
+| POST `/api/nodes/ID/claim` | Empty object; atomically claim a queued call and renew heartbeat |
+| POST `/api/nodes/ID/result` | Acknowledge `id`, `lease`, `result`, optional `error` |
+| POST `/api/capabilities/call` | UUID `id`, `node`, `capability`, `arguments`, `context_id`, `client` |
+| GET `/api/capabilities/calls/UUID?context=UUID` | Actual call outcome |
+| GET `/api/timers?context=UUID` | Current-topic persisted timers |
 | GET `/api/events?after=SEQ&context=UUID` | Incremental event consumption |
 | GET `/api/history?context=UUID&before=SEQ` | Bounded history page |
 | GET `/api/context?id=UUID&query=TEXT` | Automatically selected knowledge packet |
@@ -41,6 +49,14 @@ Hub tools are declared in `hub_runtime.py`: `memory_read`, `memory_put`,
 `contexts_list`, `context_switch`, `agent_task`, `task_status`, `notify`, and
 `phone_knowledge`. Adding a device capability requires an executor and explicit
 ownership/permission handling, not just adding a tool name to a prompt.
+
+The action tools are `capabilities_list`, `capability_call` and
+`capability_result`; `agents_list` returns configured provider IDs for delegation.
+See the [node protocol](capabilities.md) for schemas, budgets and recovery rules.
+`/api/state` includes compact nodes/calls and topic timers. Action creation
+returns HTTP 202; inspect its `status`, since built-in actions finish immediately
+while remote actions require a node acknowledgement. MCP excludes `agent_task`
+and `context_switch`; clients launch owned tasks through the task API.
 
 Command adapters receive one bounded JSON request on stdin and emit JSONL events.
 Hermes is the included example. A custom command is trusted owner configuration,

@@ -85,6 +85,11 @@ class HubTests(unittest.TestCase):
     def test_tools_scope_events_and_handoff(self):
         s=self.app.store;s.put_memory('Общее','Факт','test',0);s.put_memory('Тема','Факт','test',0,self.context);s.put_memory('Скрыто','Секрет','test',0,self.other)
         row=self.wait(self.submit()['id']);self.assertEqual(set(row['output'].removeprefix('Факты: ').split(',')),{'Общее','Тема'})
+        # Terminal status is persisted before the worker's final session event.
+        # Wait for its lifecycle to end before asserting no newer events exist.
+        deadline=time.monotonic()+3
+        while row['id'] in self.app.coordinator.active and time.monotonic()<deadline:time.sleep(.01)
+        self.assertNotIn(row['id'],self.app.coordinator.active)
         events=self.request('/api/events?after=0')
         self.assertTrue(any(e['kind']=='tool.succeeded' for e in events))
         self.assertTrue(any(e['kind']=='task.completed' for e in events))

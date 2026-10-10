@@ -6,6 +6,9 @@ history, task state, node capabilities and notifications. Models and agent runti
 
 [Русский](README.ru.md) · [Android companion](https://github.com/weisscorp/android-assistant)
 
+The optional [development OTA service](docs/dev-ota.md) builds trusted owner commits,
+publishes signed APKs over authenticated LAN HTTPS and supports Android self-updates.
+
 ```mermaid
 flowchart LR
     UI[Browser / console] --> Hub[Assistant Hub]

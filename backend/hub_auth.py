@@ -31,25 +31,29 @@ class AccessKeys:
         if owner_token is not None and self.owner_digest is None:
             raise ValueError('Invalid owner bearer token')
         with store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('''CREATE TABLE IF NOT EXISTS api_keys(
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, digest TEXT UNIQUE NOT NULL,
                 created_at REAL NOT NULL, revoked_at REAL)''')
+            if 'scope' not in {r['name'] for r in db.execute('PRAGMA table_info(api_keys)')}:
+                db.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'owner'")
 
-    def issue(self, name):
+    def issue(self, name, scope='owner'):
+        if scope not in {'owner','webhook'}:raise ValueError('Invalid API key scope')
         name = text(name, 128).strip()
         secret = 'hub_' + secrets.token_urlsafe(48)
-        row = {'id':str(uuid.uuid4()), 'name':name, 'created_at':time.time(), 'revoked_at':None}
+        row = {'id':str(uuid.uuid4()), 'name':name, 'created_at':time.time(), 'revoked_at':None,'scope':scope}
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if db.execute('SELECT count(*) FROM api_keys WHERE revoked_at IS NULL').fetchone()[0] >= MAX_KEYS:
                 raise ValueError('Too many active API keys; revoke an unused key first')
-            db.execute('INSERT INTO api_keys VALUES(?,?,?,?,NULL)',
-                       (row['id'], name, digest(secret), row['created_at']))
+            db.execute('INSERT INTO api_keys(id,name,digest,created_at,scope) VALUES(?,?,?,?,?)',
+                       (row['id'], name, digest(secret), row['created_at'],scope))
         return row, secret
 
     def list(self):
         with self.store.connect() as db:
-            return [dict(r) for r in db.execute('''SELECT id,name,created_at,revoked_at
+            return [dict(r) for r in db.execute('''SELECT id,name,created_at,revoked_at,scope
                 FROM api_keys ORDER BY created_at DESC''')]
 
     def revoke(self, key_id):
@@ -75,6 +79,12 @@ class AccessKeys:
             return bool(self.owner_digest)
         with self.store.connect() as db:
             return bool(db.execute('SELECT 1 FROM api_keys WHERE id=? AND revoked_at IS NULL', (principal,)).fetchone())
+
+    def scope(self, principal):
+        if principal == OWNER:return 'owner'
+        with self.store.connect() as db:
+            row=db.execute('SELECT scope FROM api_keys WHERE id=? AND revoked_at IS NULL',(principal,)).fetchone()
+            return row['scope'] if row else None
 
 
 class BrowserCredentials:
@@ -118,6 +128,10 @@ class BrowserCredentials:
 
 
 class RateLimited(PermissionError):
+    pass
+
+
+class Forbidden(PermissionError):
     pass
 
 

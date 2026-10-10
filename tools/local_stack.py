@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 import urllib.request
 import webbrowser
 
@@ -46,6 +47,8 @@ def configure(args):
     config.setdefault('coucou_capability',secrets.token_urlsafe(32))
     if args.local_node:
         config['local_node'] = True
+    if getattr(args,'desktop_notifications',False):
+        config.setdefault('desktop_notifications',{'id':'desktop:local-host','device':str(uuid.uuid4())})
     config['providers'].setdefault('openai',{'type':'cloud','protocol':'openai','url':'https://api.openai.com/v1',
         'model':os.environ.get('OPENAI_MODEL',''),'key_env':'OPENAI_API_KEY'})
     config['providers'].setdefault('anthropic',{'type':'cloud','protocol':'anthropic','url':'https://api.anthropic.com/v1',
@@ -147,6 +150,12 @@ def start(root):
                 launch(root,'local-node',[sys.executable,str(BACKEND/'hub_node.py'),
                     '--url',hub_url(config),'--token-file',str(root/'token'),
                     '--id','local-host','--label','Local computer','--kind','computer'])
+            desktop=config.get('desktop_notifications')
+            if desktop and sys.platform=='darwin':
+                argv=[sys.executable,str(BACKEND/'hub_desktop.py'),'--url',hub_url(config),
+                    '--token-file',str(root/'token'),'--id',desktop['id'],'--device',desktop['device']]
+                if config.get('coucou_socket'):argv+=['--coucou-socket',config['coucou_socket']]
+                launch(root,'desktop-notifications',argv)
             coucou=Path(config.get('coucou_app',str(root/'runtime/coucou/Coucou.app')))/'Contents/MacOS/Coucou'
             if sys.platform=='darwin' and coucou.exists() and not live(root,'coucou'):
                 # Do not duplicate or take ownership of an already running GUI app.
@@ -165,7 +174,7 @@ def start(root):
 
 
 def stop(root):
-    for name in ('local-node','hub','ao','coucou'):
+    for name in ('desktop-notifications','local-node','hub','ao','coucou'):
         if live(root,name):
             saved=json.loads((root/(name+'.pid.json')).read_text());os.killpg(saved['pid'],signal.SIGTERM)
             deadline=time.monotonic()+8
@@ -180,6 +189,7 @@ def main():
     sub=p.add_subparsers(dest='command',required=True)
     setup=sub.add_parser('setup');setup.add_argument('--hermes-root',type=Path);setup.add_argument('--hermes-python',type=Path)
     setup.add_argument('--local-node',action='store_true',help='Enable a local node with read-only system.info/system.time')
+    setup.add_argument('--desktop-notifications',action='store_true',help='Display incident reports in the Coucou mascot area')
     for name in ('start','stop','status','open','coucou-url'):sub.add_parser(name)
     ask=sub.add_parser('ask');ask.add_argument('prompt');ask.add_argument('--provider',default='ollama');ask.add_argument('--context')
     args=p.parse_args();root=args.directory.absolute()

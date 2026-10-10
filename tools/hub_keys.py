@@ -12,14 +12,14 @@ from hub_auth import AccessKeys
 from hub_server import private_json
 
 
-def create(keys, name, output):
+def create(keys, name, output, scope='owner'):
     # Refuse overwrites and symlinks. The secret goes only to a new private file,
     # never stdout, process arguments, a URL or the Hub's event/history tables.
     fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     row = None
     try:
         with os.fdopen(fd, 'w') as stream:
-            row, secret = keys.issue(name)
+            row, secret = keys.issue(name,scope)
             stream.write(secret+'\n')
             stream.flush()
             os.fsync(stream.fileno())
@@ -39,13 +39,14 @@ def main():
     make = sub.add_parser('create')
     make.add_argument('name')
     make.add_argument('--output', type=Path, required=True)
+    make.add_argument('--scope',choices=['owner','webhook'],default='owner',help='webhook can only POST events; owner has full API access')
     sub.add_parser('list')
     revoke = sub.add_parser('revoke')
     revoke.add_argument('id', help='Public UUID from list; not the secret')
     args = parser.parse_args()
     keys = AccessKeys(HubStore(private_json(args.config)['state']))
     if args.command == 'create':
-        value = create(keys, args.name, args.output)
+        value = create(keys, args.name, args.output,args.scope)
     elif args.command == 'list':
         value = keys.list()
     else:

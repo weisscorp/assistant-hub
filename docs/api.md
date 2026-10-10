@@ -30,6 +30,10 @@ Bearer header, not a URL. All keys have full owner access.
 | GET `/api/context?id=UUID&query=TEXT` | Automatically selected knowledge packet |
 | GET/POST `/api/memory` | Paginated facts / revisioned write |
 | POST `/api/tool` | Hub tool invocation scoped to context/client/parent task |
+| POST `/webhooks/events` | JSON or UTF-8 text → isolated incident queue (owner or webhook key) |
+| GET `/api/incidents` and `/api/incidents/UUID` | Assessment and delivery state; detail includes original payload |
+| POST `/api/presence` | Recent device activity without GPS |
+| POST `/api/deliveries/claim` and `/api/deliveries/receipt` | Display-only desktop outbox |
 | POST `/api/notify` | Topic `context_id`, `source`, `body` |
 | POST `/api/follow` | Follow notification for one client with expected revision |
 | GET `/v1/models` | Provider/topic model aliases |
@@ -67,3 +71,5 @@ Command adapters receive one bounded JSON request on stdin and emit JSONL events
 Hermes is the included example. A custom command is trusted owner configuration,
 not untrusted text extracted from a chat/webpage. Use synthetic protocol fixtures
 and temporary state to test integrations before enabling real side effects.
+
+See [webhook incidents](webhooks.md) for scoped producer keys, delivery guarantees and phone/Coucou setup.

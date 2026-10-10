@@ -16,7 +16,7 @@ from agent_hub import Conflict, encoded, uid, text
 from hub_runtime import Coordinator, RuntimeStore, TERMINAL
 from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
 from hub_network import bind_ip, authority, ProxyOrigin
-from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited
+from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited, Forbidden
 
 
 def private_json(path):
@@ -56,6 +56,8 @@ class HubApplication:
         self.fabric = self.coordinator.fabric
         from hub_mobile import MobileLink
         self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
+        from hub_incidents import Incidents
+        self.incidents = Incidents(self.store,self.mobile.link,config)
         self.lock = threading.RLock()
         self.cached_status, self.status_at = {}, 0
 
@@ -184,6 +186,7 @@ class HubHandler(BaseHTTPRequestHandler):
                 body = self.body()
                 principal = self.app.auth.resolve(body.get('token'))
                 if not principal: self.app.auth_failures.reject(self.auth_peer)
+                if self.app.auth.scope(principal)!='owner':raise Forbidden('Этот ключ может только отправлять вебхуки')
                 return self.reply({'ok':True},headers={'Set-Cookie':self.session_cookie(principal)})
             if path == '/ticket' and method == 'GET':
                 principal = self.app.browser.resolve(get('id',''), self.request_origin, ticket=True)
@@ -201,6 +204,17 @@ class HubHandler(BaseHTTPRequestHandler):
                 path=path[len(prefix):]
             principal = self.authorized()
             if not principal and not coucou_access: self.app.auth_failures.reject(self.auth_peer)
+            if principal and self.app.auth.scope(principal)=='webhook' and (method,path)!=('POST','/webhooks/events'):
+                raise Forbidden('Этот ключ может только отправлять вебхуки')
+            if path=='/webhooks/events' and method=='POST':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<=65536:raise ValueError('Webhook payload must be 1..65536 bytes')
+                raw=self.rfile.read(length)
+                if len(raw)!=length:raise ValueError('Incomplete webhook payload')
+                value=self.app.incidents.accept(raw,self.headers.get('Content-Type','application/json'),principal,
+                    urllib.parse.unquote(self.headers.get('X-Event-Source','webhook'),errors='strict'),urllib.parse.unquote(self.headers.get('X-Event-Title','Новое событие'),errors='strict'),
+                    self.headers.get('X-Event-Targets','auto'),self.headers.get('Idempotency-Key'))
+                return self.reply({'id':value['id'],'status':value['status'],'targets':value['targets']},202)
             s = self.app.store
             if path.startswith('/link/'):
                 return self.mobile_request(path,query,method)
@@ -217,6 +231,9 @@ class HubHandler(BaseHTTPRequestHandler):
                         'calls':[{k:c[k] for k in ('id','node_id','capability','status','error')} for c in self.app.fabric.calls(context)],
                         'notifications':s.notifications()[-60:], 'coucou':{'socketConfigured':bool(self.app.config.get('coucou_socket'))}})
                 if path == '/api/events': return self.reply(s.events(int(get('after','0')), get('context')))
+                if path == '/api/incidents':return self.reply(self.app.incidents.list())
+                if path.startswith('/api/incidents/'):return self.reply(self.app.incidents.get(path.rsplit('/',1)[1]))
+                if path == '/api/presence':return self.reply(self.app.incidents.clients())
                 if path == '/api/context': return self.reply(s.packet(uid(get('id')), int(get('budget','24000')),query=get('query')))
                 if path == '/api/memory':
                     cursor = [get('after_scope'),get('after_key')] if get('after_scope') is not None else None
@@ -238,6 +255,9 @@ class HubHandler(BaseHTTPRequestHandler):
                         for c in s.contexts() for p in self.app.providers]})
             else:
                 body = self.body()
+                if path == '/api/presence':return self.reply(self.app.incidents.presence(body['id'],body['kind'],body['label'],body['active'],body.get('idle_seconds',0)))
+                if path == '/api/deliveries/claim':return self.reply(self.app.incidents.claim(body['client']))
+                if path == '/api/deliveries/receipt':return self.reply(self.app.incidents.receipt(body['client'],body['id'],body['status'],body.get('lease'),body.get('coucou_written',False)))
                 if path == '/api/tickets':
                     ticket = self.app.browser.ticket(principal, self.request_origin)
                     return self.reply({'path':'/ticket?id='+ticket})
@@ -278,6 +298,9 @@ class HubHandler(BaseHTTPRequestHandler):
                 if path == '/conversation': return self.reply(self.app.mobile.turn(body))
             self.reply({'error':'Unknown endpoint'},404)
         except Conflict as error: self.reply({'error':str(error)},409)
+        except Forbidden as error:
+            self.close_connection=True
+            self.reply({'error':str(error)},403,{'Connection':'close'})
         except RateLimited as error:
             self.close_connection = True
             self.reply({'error':str(error)},429,{'Retry-After':'60','Connection':'close'})
@@ -310,6 +333,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 if route==['knowledge']:return self.reply(self.app.mobile.sync(device,body))
                 if route==['events']:return self.reply(link.publish(device,body))
                 if route==['ack'] and set(body)=={'through'}:return self.reply(link.ack(device,body['through']))
+                if route==['presence']:return self.reply(self.app.incidents.presence('android:'+device,'phone','Android',body['active'],body.get('idle_seconds',0)))
+                if route==['receipt']:return self.reply(self.app.incidents.receipt('android:'+device,body['id'],body['status']))
             self.reply({'error':'Unknown link endpoint'},404)
         except RevisionConflict as error:self.reply({'error':'revision_conflict','revision':error.revision},409)
         except KeyError:self.reply({'error':'Unknown paired source/device'},404)
@@ -357,6 +382,7 @@ def main():
     os.umask(0o077)
     app = HubApplication(config)
     app.fabric.start()
+    app.incidents.start()
     server_type = ThreadingHTTPServer
     if host.version == 6:
         class IPv6Server(ThreadingHTTPServer):
@@ -374,6 +400,7 @@ def main():
     try: server.serve_forever()
     finally:
         app.fabric.close()
+        app.incidents.close()
         server.server_close()
         deadline=time.monotonic()+4
         while app.coordinator.active and time.monotonic()<deadline:time.sleep(.05)

@@ -6,7 +6,9 @@ interface (see [transport](docs/capabilities.md)). It validates Host/Origin.
 Browser tickets are short-lived and single-use; full API access requires the
 owner's generated bearer token or a named client key. Named keys store only
 digests and can be revoked locally, including their browser sessions/tickets.
-All keys have full owner access; there are no separate tenants or per-node grants.
+Owner keys have full access. Webhook keys only publish incidents; MCP keys and
+dot OAuth grants only access `/mcp` and its bounded tools for live requests.
+There are no separate tenants or per-node grants.
 Coucou has a separate limited chat capability URL accepted only on direct
 loopback. None of these credentials are public configuration. Source publication
 does not open a network listener.
@@ -18,6 +20,18 @@ are rate-limited with bounded in-memory state. See [deployment](docs/internet-ac
 for key management, HAProxy headers and transport boundaries. This layer is API
 authentication, not a replacement for proxy connection/rate limits or isolation
 of trusted agent code.
+
+The optional [dot bridge](docs/dot-integration.md) adds an explicit OAuth consent
+page, exact ChatGPT redirect allowlisting, PKCE, resource-bound tokens and grant
+revocation. Its public metadata/registration routes expose no Hub knowledge.
+The private tunnel relay reads a dedicated MCP key from disk; tunnel access must
+remain within the owner's intended OpenAI workspace/account. Event filters route
+requests and do not provide a separate user's data isolation.
+
+Callback secrets live in the private database. Delivery checks resolved public
+addresses, pins the validated destination for TLS, signs exact payload bytes and
+does not follow redirects. Revocation/cancellation stops new tools/deliveries,
+but does not undo a device action already accepted by an executor.
 
 Use HTTP only inside a trusted encrypted VPN; a LAN IP alone provides no transport
 encryption. Node workers hold a full owner-access key and are trusted owner code;

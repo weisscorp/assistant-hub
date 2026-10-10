@@ -11,7 +11,7 @@ to models, hosted service data, branding or binaries installed separately.
 | [Agent Orchestrator — OrchestratorInc and contributors](https://github.com/OrchestratorInc/agent-orchestrator) | Owned multi-agent worker sessions | [Apache-2.0](licenses/Agent-Orchestrator-Apache-2.0.txt) | Adapter only, daemon installed separately |
 | [Codex — OpenAI and contributors](https://github.com/openai/codex) | Native app-server protocol and authenticated CLI workers | [Apache-2.0](licenses/Apache-2.0.txt) | Adapter only, CLI installed separately; desktop app not bundled |
 | [Ollama and contributors](https://github.com/ollama/ollama) | Local model runtime/tool API | [MIT](https://github.com/ollama/ollama/blob/main/LICENSE) | HTTP integration; no runtime/weights |
-| [MCP Python SDK — Anthropic and contributors](https://github.com/modelcontextprotocol/python-sdk) | Standard stdio tool transport | [MIT](licenses/MCP-Python-MIT.txt) | Pinned optional dependency, installed separately |
+| [MCP Python SDK — Anthropic and contributors](https://github.com/modelcontextprotocol/python-sdk) | Standard stdio tool transport and HTTP interoperability checks | [MIT](licenses/MCP-Python-MIT.txt) | Pinned optional dependency, installed separately |
 | [SQLite](https://www.sqlite.org/) | WAL storage and FTS5 indexed recall | [Public domain](https://www.sqlite.org/copyright.html) | Used through Python's standard library |
 | [Python](https://www.python.org/) | Runtime/standard library | [PSF terms](https://docs.python.org/3/license.html) | Installed separately |
 
@@ -25,6 +25,12 @@ OpenAI/Anthropic/OpenAI-compatible service adapters are independently implemente
 protocol clients. Provider names remain their owners' names. Configure credentials
 and comply with the chosen service's terms. Model licenses are independent of
 both the Hub's license and its protocol compatibility.
+
+The OpenAI dot adapter independently implements the documented
+[MCP Events contract](https://developers.openai.com/plugins/build/mcp-events).
+ChatGPT/dots are hosted services, not bundled model weights or software licensed
+by this repository. The optional OpenAI Secure MCP Tunnel client is installed
+separately; no tunnel binary or account credential is distributed here.
 
 The Android companion has a separate [dependency/voice notice](https://github.com/weisscorp/android-assistant/blob/main/THIRD_PARTY.md).
 No claim is made that an APK built with arbitrary third-party voices is MIT-only.

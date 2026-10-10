@@ -44,6 +44,10 @@ def configure(args):
     binary=shutil.which('codex')
     if binary and 'codex' not in config['providers']:
         config['providers']['codex']={'type':'codex','binary':binary,'workspace':str(root/'agents/codex')}
+    if getattr(args,'codex_link',False):
+        executable=binary or config.get('providers',{}).get('codex',{}).get('binary')
+        if not executable:raise ValueError('Install native Codex CLI before enabling the bridge')
+        config.setdefault('codex_link',{'binary':executable,'host':'local','poll_seconds':15,'targets':'auto'})
     config.setdefault('coucou_capability',secrets.token_urlsafe(32))
     if args.local_node:
         config['local_node'] = True
@@ -190,6 +194,7 @@ def main():
     setup=sub.add_parser('setup');setup.add_argument('--hermes-root',type=Path);setup.add_argument('--hermes-python',type=Path)
     setup.add_argument('--local-node',action='store_true',help='Enable a local node with read-only system.info/system.time')
     setup.add_argument('--desktop-notifications',action='store_true',help='Display incident reports in the Coucou mascot area')
+    setup.add_argument('--codex-link',action='store_true',help='Observe native Codex completions and enable explicit voice continuations')
     for name in ('start','stop','status','open','coucou-url'):sub.add_parser(name)
     ask=sub.add_parser('ask');ask.add_argument('prompt');ask.add_argument('--provider',default='ollama');ask.add_argument('--context')
     args=p.parse_args();root=args.directory.absolute()

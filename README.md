@@ -36,6 +36,8 @@ flowchart LR
 - Memory tools that instruct agents to save durable user facts automatically.
   Actual saving still depends on a successful model tool call.
 - Ollama, native Codex, official Hermes through MCP, and Agent Orchestrator adapters.
+- Native Codex completion reports through the incident outbox, with explicit
+  voice/text task selection and continuation.
 - Original Coucou connected through an OpenAI-compatible local provider facade
   and its Unix socket event interface. Coucou's code and mascot belong to its authors.
 - Mobile knowledge snapshot/image sync and a polling notification inbox.
@@ -83,6 +85,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 - [API and extending providers](docs/api.md)
 - [API keys and Internet access through HAProxy](docs/internet-access.md)
 - [Webhook incidents and notifications](docs/webhooks.md)
+- [Codex completion reports and voice commands](docs/codex-voice.md)
 - [Security, private state and backups](SECURITY.md)
 - [Third-party credits and licenses](THIRD_PARTY.md)
 

@@ -31,6 +31,11 @@ class BridgeError(RuntimeError):
 
 
 class CodexReader:
+    allowed_methods = READ_METHODS
+
+    def notification(self, value):
+        """Read clients ignore notifications; explicit writers can retain them."""
+
     def __init__(self, binary='codex', socket_path=None, timeout=15, *, command=None, environment=None):
         if not 0 < timeout <= 60:
             raise ValueError('invalid timeout')
@@ -95,7 +100,7 @@ class CodexReader:
                 raise BridgeError('Codex response too large; use a smaller page')
 
     def call(self, method, params):
-        if method not in READ_METHODS:
+        if method not in self.allowed_methods:
             raise ValueError('bridge only supports read methods')
         self.sequence += 1
         request_id = self.sequence
@@ -107,6 +112,8 @@ class CodexReader:
                 if 'id' in value:
                     # A read client cannot grant execution or permission requests.
                     self.send({'id':value['id'], 'error':{'code':-32601, 'message':'read-only context bridge'}})
+                else:
+                    self.notification(value)
                 continue
             if type(value.get('id')) is not int or value['id'] != request_id:
                 raise BridgeError('unexpected Codex response ID')

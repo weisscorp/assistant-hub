@@ -6,7 +6,8 @@ SameSite cookie, normally obtained through `tools/local_stack.py open`.
 Host/Origin checks reject arbitrary origins. This is a single-owner API.
 Named, revocable client keys and a trusted HTTPS reverse proxy are supported;
 see [API keys and Internet access](internet-access.md). Secrets belong in the
-Bearer header, not a URL. All keys have full owner access.
+Bearer header, not a URL. Owner keys have full access; webhook keys can only
+publish events.
 
 | Method/path | Role |
 |---|---|
@@ -39,6 +40,11 @@ Bearer header, not a URL. All keys have full owner access.
 | GET `/v1/models` | Provider/topic model aliases |
 | POST `/v1/chat/completions` | OpenAI-compatible facade (including Coucou) |
 | POST `/conversation` | Mobile text turn |
+| GET `/api/codex/chats` and `/api/codex/chats/UUID` | Native Codex catalog and saved final report |
+| GET `/api/codex/status` | Observer enabled/connection error |
+| POST `/api/codex/voice` | Explicit list/select/report/continuation command; `id`, `client`, `text`, optional `context_id` |
+| GET `/api/codex/commands?client=NAME&context=UUID` | Requesting client's continuation outcomes |
+| POST `/api/codex/acknowledge` | Owner acknowledgement of uncertain command; no retry |
 | `/link/DEVICE_UUID/...` | Mobile sync, images, events and acknowledgements |
 
 See `hub_server.py` and HTTP tests for exact validation and response fields.

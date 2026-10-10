@@ -58,6 +58,9 @@ class HubApplication:
         self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
         from hub_incidents import Incidents
         self.incidents = Incidents(self.store,self.mobile.link,config)
+        from hub_codex import CodexLink
+        self.codex = CodexLink(self.store,self.incidents,config.get('codex_link'))
+        self.coordinator.codex = self.codex
         self.lock = threading.RLock()
         self.cached_status, self.status_at = {}, 0
 
@@ -226,12 +229,16 @@ class HubHandler(BaseHTTPRequestHandler):
                     memory = s.memory_page(context,limit=12)
                     return self.reply({'contexts':s.contexts(), 'focus':focus, 'providers':self.app.statuses(),
                         'history':s.history(context), 'memory':memory['items'], 'memoryHasMore':memory['next'] is not None,
-                        'tasks':s.tasks(), 'chats':s.chats(),
+                        'tasks':s.tasks(), 'chats':s.chats(limit=100),
                         'nodes':self.app.fabric.nodes(), 'timers':self.app.fabric.timers(context),
                         'calls':[{k:c[k] for k in ('id','node_id','capability','status','error')} for c in self.app.fabric.calls(context)],
                         'notifications':s.notifications()[-60:], 'coucou':{'socketConfigured':bool(self.app.config.get('coucou_socket'))}})
                 if path == '/api/events': return self.reply(s.events(int(get('after','0')), get('context')))
                 if path == '/api/incidents':return self.reply(self.app.incidents.list())
+                if path == '/api/codex/chats':return self.reply(self.app.codex.list(get('query','')))
+                if path == '/api/codex/status':return self.reply({'enabled':self.app.codex.enabled,'error':self.app.codex.last_error})
+                if path == '/api/codex/commands':return self.reply(self.app.codex.commands(get('client','desktop'),uid(get('context'))))
+                if path.startswith('/api/codex/chats/'):return self.reply(self.app.codex.report(path.rsplit('/',1)[1]))
                 if path.startswith('/api/incidents/'):return self.reply(self.app.incidents.get(path.rsplit('/',1)[1]))
                 if path == '/api/presence':return self.reply(self.app.incidents.clients())
                 if path == '/api/context': return self.reply(s.packet(uid(get('id')), int(get('budget','24000')),query=get('query')))
@@ -255,6 +262,15 @@ class HubHandler(BaseHTTPRequestHandler):
                         for c in s.contexts() for p in self.app.providers]})
             else:
                 body = self.body()
+                if path == '/api/codex/acknowledge':
+                    return self.reply(self.app.codex.acknowledge_unknown(body['id'],body['client'],body['context_id']))
+                if path == '/api/codex/voice':
+                    client=text(body['client'],128)
+                    context=uid(body['context_id']) if body.get('context_id') else self.app.client_focus(client)['context_id']
+                    with s.connect() as db:s.require_context(db,context)
+                    reply=self.app.codex.voice(text(body['text'],2000),client,context,uid(body['id']))
+                    if reply is None:raise ValueError('Use an explicit Codex command')
+                    return self.reply({'id':body['id'],'reply':reply[:1500]})
                 if path == '/api/presence':return self.reply(self.app.incidents.presence(body['id'],body['kind'],body['label'],body['active'],body.get('idle_seconds',0)))
                 if path == '/api/deliveries/claim':return self.reply(self.app.incidents.claim(body['client']))
                 if path == '/api/deliveries/receipt':return self.reply(self.app.incidents.receipt(body['client'],body['id'],body['status'],body.get('lease'),body.get('coucou_written',False)))
@@ -383,6 +399,7 @@ def main():
     app = HubApplication(config)
     app.fabric.start()
     app.incidents.start()
+    app.codex.start()
     server_type = ThreadingHTTPServer
     if host.version == 6:
         class IPv6Server(ThreadingHTTPServer):
@@ -399,6 +416,7 @@ def main():
     signal.signal(signal.SIGTERM,shutdown)
     try: server.serve_forever()
     finally:
+        app.codex.close()
         app.fabric.close()
         app.incidents.close()
         server.server_close()

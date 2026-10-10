@@ -71,6 +71,7 @@ class HubStore:
                 CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY, host TEXT NOT NULL, adapter TEXT NOT NULL,
                     native_id TEXT NOT NULL, title TEXT NOT NULL, cwd TEXT NOT NULL, observed_at INTEGER NOT NULL,
                     context_id TEXT REFERENCES contexts(id), UNIQUE(host,adapter,native_id));
+                CREATE INDEX IF NOT EXISTS chats_recent ON chats(observed_at DESC,id);
                 CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY, context_id TEXT NOT NULL REFERENCES contexts(id),
                     source TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL);
             ''')
@@ -270,11 +271,15 @@ class HubStore:
                        (chat_id, host, adapter, native_id, title, cwd, int(time.time()), bound))
             return dict(db.execute('SELECT * FROM chats WHERE id=?', (chat_id,)).fetchone())
 
-    def chats(self, context=None):
+    def chats(self, context=None, limit=None):
+        if limit is not None:number(limit,1,1000)
         with self.connect() as db:
             if context is not None:
                 self.require_context(db, context)
-            rows = db.execute('SELECT * FROM chats WHERE context_id=? ORDER BY host,adapter,native_id', (context,)) if context else db.execute('SELECT * FROM chats ORDER BY host,adapter,native_id')
+            where=' WHERE context_id=?' if context else ''
+            params=([context] if context else [])+([limit] if limit is not None else [])
+            order='observed_at DESC,id' if limit is not None else 'host,adapter,native_id'
+            rows = db.execute('SELECT * FROM chats'+where+' ORDER BY '+order+(' LIMIT ?' if limit is not None else ''),params)
             return [dict(row) for row in rows]
 
     def notify(self, context, source, body):

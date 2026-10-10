@@ -40,6 +40,9 @@ To explicitly list/import a bounded context from accessible native chats, inspec
 `python3 backend/codex_context_bridge.py --help`. This separate bridge only calls
 read methods; importing does not authorize continuing someone else's chat.
 
+For completion events and explicit voice continuation in an existing native
+session, enable the separate [Codex voice bridge](codex-voice.md).
+
 ## Hermes
 
 Install official [Nous Research Hermes](https://github.com/NousResearch/hermes-agent)

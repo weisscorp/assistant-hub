@@ -37,7 +37,16 @@ function render(){
  $('notice-count').textContent=state.notifications.length;
  $('agent-cards').replaceChildren(...options.map(([k,v])=>{const d=el('article',undefined,'card');d.append(el('h3',names[k]||k),el('p',v.detail),el('p',v.ready?'Готов к запросам':'Подключение пока недоступно','meta'));return d;}));
  $('task-list').replaceChildren(...state.tasks.map(t=>{const d=el('article',undefined,'card');d.append(el('h3',t.prompt.slice(0,160)),el('p',(names[t.provider]||t.provider)+' · '+statusNames[t.status],'meta'));if(t.output||t.error)d.append(el('p',(t.error||t.output).slice(0,3000)));if(!terminal.has(t.status)){const b=el('button','Остановить');b.onclick=()=>safe(async()=>{await api('/api/cancel',{id:t.id});await refresh();});d.append(b);}return d;}));if(!state.tasks.length)$('task-list').append(el('p','Задач пока нет. Выберите агента и отправьте запрос.','muted'));
- $('chat-list').replaceChildren(...state.chats.map(c=>{const d=el('article',undefined,'card');d.append(el('h3',c.title||'Чат агента'),el('p',c.adapter+' · '+c.host,'meta'));return d;}));
+ $('chat-list').replaceChildren(...state.chats.map(c=>{
+  const d=el('article',undefined,'card');d.append(el('h3',c.title||'Чат агента'),el('p',c.adapter+' · '+c.host,'meta'));
+  if(c.adapter==='codex'){
+   const actions=el('div',undefined,'actions'),report=el('button','Отчёт'),select=el('button','Выбрать для разговора');
+   report.onclick=()=>safe(async()=>{const r=await api('/api/codex/chats/'+encodeURIComponent(c.id));$('codex-report-title').textContent=r.title;$('codex-report-body').textContent=(statusNames[r.status]||r.status)+(r.stale?' · сохранённый статус':'')+(r.read_error?' · чтение временно недоступно':'')+'\n\n'+(r.report||r.error||'Итогового отчёта пока нет.')+(r.files.length?'\n\nИзменённые файлы:\n'+r.files.join('\n'):'');$('codex-report-dialog').showModal();});
+   select.onclick=()=>safe(async()=>{const r=await api('/api/codex/voice',{id:crypto.randomUUID(),client,context_id:state.focus.context_id,text:'выбери задачу кодекса '+c.id});showView('chat');$('codex-report-title').textContent=c.title;$('codex-report-body').textContent=r.reply;$('codex-report-dialog').showModal();});
+   actions.append(report,select);d.append(actions);
+  }
+  return d;
+ }));
  $('notification-list').replaceChildren(...[...state.notifications].reverse().map(n=>{const d=el('article',undefined,'card');d.append(el('h3',state.contexts.find(c=>c.id===n.context_id)?.title||'Тема'),el('p',n.body),el('p',(names[n.source]||n.source)+' · '+new Date(n.created_at*1000).toLocaleString('ru'),'meta'));const b=el('button','Обсудить');b.onclick=()=>safe(async()=>{await api('/api/follow',{client,notification:n.id,revision:state.focus.revision});showView('chat');await refresh();});d.append(b);return d;}));if(!state.notifications.length)$('notification-list').append(el('p','Уведомления появятся после завершения задач.','muted'));
 }
 const deliveryNames={queued:'Ожидает подключения',queued_on_phone:'В очереди телефона',running:'Передаётся',submitted:'Передано приложению',blocked:'Уведомления запрещены',failed:'Ошибка',unknown:'Подтверждения нет'};

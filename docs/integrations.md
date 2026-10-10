@@ -100,6 +100,12 @@ address contains a private scoped capability; do not publish it in screenshots,
 issues or configuration examples. It grants only the model/chat facade, not
 administrative Hub endpoints.
 
+Timer creation, listing and cancellation are built-in model tools on this same
+connection. **«Таймер можешь поставить?» → «На сколько?» → «На пять минут»** is a
+single topic conversation. For completion in the mascot area, enable the
+[desktop notification worker](webhooks.md#coucou-mascot-area); the model chat
+connection alone does not poll timed notifications.
+
 The default socket is `~/Library/Application Support/NotchBuddy/nb.sock`. Hub emits
 lifecycle/tool/response events there. Coucou's normal Hermes hook plugin is a
 separate integration with a standard Hermes profile; the Hub's isolated Hermes

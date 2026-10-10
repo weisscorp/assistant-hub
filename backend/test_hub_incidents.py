@@ -109,7 +109,10 @@ class IncidentTests(unittest.TestCase):
         client=Client();event={'id':uid(),'lease':uid(),'title':'Fixture','body':'Text'}
         with patch('hub_desktop.write_event',return_value=True) as write,patch('hub_desktop.time.sleep'):
             deliver(client,self.desktop,event,Path('/tmp/fixture.sock'),uid())
-        self.assertEqual(write.call_count,1);self.assertEqual(client.calls,2)
+        self.assertEqual(write.call_count,2);self.assertEqual(client.calls,2)
+        hooks=[json.loads(call.args[1]) for call in write.call_args_list]
+        self.assertEqual([h['hook_event_name'] for h in hooks],['SessionStart','Stop'])
+        self.assertEqual(hooks[0]['session_id'],hooks[1]['session_id'])
         self.assertTrue(client.saved['coucou_written']);self.assertEqual(client.saved['status'],'submitted')
 
 class WebhookHttpTests(unittest.TestCase):

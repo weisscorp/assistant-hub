@@ -45,7 +45,13 @@ def presence():
 def deliver(client, identity, event, coucou_socket, device):
     hook={'version':1,'deviceId':device,'conversationId':event['id'],
           'kind':'assistant.message','text':(event['title']+'\n'+event['body'])[:4000]}
-    written=write_event(coucou_socket,wire_event(hook,'hub-events'))
+    # Coucou 0.2.3's Stop updates an existing pill; it does not create one.
+    # One connection accepts one JSON line. Acknowledge SessionStart before
+    # sending Stop on its own connection, so dispatch does not overtake setup.
+    start={k:v for k,v in hook.items() if k!='text'};start['kind']='session.started'
+    written=write_event(coucou_socket,wire_event(start,'hub-events'),timeout=1,acknowledge=True)
+    if written:
+        written=write_event(coucou_socket,wire_event(hook,'hub-events'),timeout=1,acknowledge=True)
     status='submitted' if written else 'unknown'
     receipt={'client':identity,'id':event['id'],'lease':event['lease'],
              'status':status,'coucou_written':written}

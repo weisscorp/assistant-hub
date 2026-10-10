@@ -115,6 +115,46 @@ class CoucouEventsTest(unittest.TestCase):
                     client.sendall.assert_called_once_with(data)
                     client.recv.assert_not_called()
 
+    def test_notification_bootstraps_pill_before_stop_on_separate_connections(self):
+        from hub_desktop import deliver
+        with tempfile.TemporaryDirectory(prefix='cc-',dir='/tmp') as directory:
+            path=Path(directory)/'cc.sock'
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:
+                listener.bind(str(path));listener.listen();listener.settimeout(3)
+                received=[];visible=[];sessions=set();errors=[]
+                def peer():
+                    try:
+                        for _ in range(2):
+                            with listener.accept()[0] as connection:
+                                raw=b''
+                                while b'\n' not in raw:raw+=connection.recv(32768)
+                                hook=json.loads(raw);received.append(hook)
+                                if hook['hook_event_name']=='SessionStart':sessions.add(hook['session_id'])
+                                elif hook['session_id'] in sessions:visible.append(hook['last_assistant_message'])
+                                connection.sendall(b'{"ok":');connection.sendall(b'true}\n')
+                    except Exception as exc:errors.append(exc)
+                thread=threading.Thread(target=peer);thread.start()
+                class Client:
+                    def request(self,path,body):self.receipt=body;return {'tracked':True}
+                client=Client()
+                deliver(client,'desktop:fixture',{'id':CONVERSATION,'lease':CONVERSATION,'title':'Таймер завершён','body':'Fixture'},path,DEVICE)
+                thread.join(4)
+                self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+                self.assertEqual([h['hook_event_name'] for h in received],['SessionStart','Stop'])
+                self.assertEqual(visible,['Таймер завершён\nFixture'])
+                self.assertEqual(client.receipt['status'],'submitted')
+
+    def test_failed_bootstrap_never_sends_stop_or_replays_initialization(self):
+        from hub_desktop import deliver
+        class Client:
+            def request(self,path,body):self.receipt=body;return {'tracked':True}
+        client=Client()
+        with patch('hub_desktop.write_event',return_value=False) as write:
+            deliver(client,'desktop:fixture',{'id':CONVERSATION,'lease':CONVERSATION,'title':'Fixture','body':'Text'},Path('/tmp/fixture.sock'),DEVICE)
+        self.assertEqual(write.call_count,1)
+        self.assertEqual(client.receipt['status'],'unknown')
+        self.assertFalse(client.receipt['coucou_written'])
+
     def test_cli_requires_opt_in_and_limits_input_without_echoing_it(self):
         script = str(Path(__file__).with_name('coucou_events.py'))
         no_mode = subprocess.run([sys.executable, script], input='', text=True, capture_output=True, timeout=3)

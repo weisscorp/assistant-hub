@@ -69,6 +69,7 @@ class FabricTests(unittest.TestCase):
 
     def test_discovery_does_not_invent_actions_and_tracks_offline_nodes(self):
         self.assertEqual(self.fabric.nodes('timer',True)[0]['id'],'hub')
+        self.assertEqual(self.fabric.nodes('таймер',True)[0]['id'],'hub')
         self.assertEqual(self.fabric.nodes('not-advertised',True),[])
         self.now+=91
         self.assertFalse(next(n for n in self.fabric.nodes() if n['id']=='fixture-node')['online'])
@@ -193,7 +194,7 @@ class FabricTests(unittest.TestCase):
 
     def test_named_nodes_get_typed_tools_that_share_validation_and_idempotency(self):
         coordinator=Coordinator(self.store,{})
-        row=self.store.create_task(self.context,'test','fixture','Поставь таймер в hub',key())[0]
+        row=self.store.create_task(self.context,'test','fixture','Поставь таймер на 5 секунд в hub',key())[0]
         tools=coordinator.node_tools(row)
         name=next(n for n,t in tools.items() if t[2]=='timer.create')
         args={'duration_seconds':5,'label':'Synthetic timer'}
@@ -201,7 +202,9 @@ class FabricTests(unittest.TestCase):
         self.assertEqual(one['status'],'succeeded');self.assertEqual(one['id'],two['id'])
         self.assertIn('error',coordinator.call_tool(name,{'duration_seconds':True},row))
         self.assertEqual(len(self.fabric.timers(self.context)),1)
-        self.assertEqual(coordinator.node_tools(dict(row,prompt='Generic synthetic conversation')), {})
+        generic=coordinator.node_tools(dict(row,prompt='на пять минут'))
+        self.assertEqual({(t[1],t[2]) for t in generic.values()},
+                         {('hub','timer.create'),('hub','timer.list'),('hub','timer.cancel')})
 
 
 class FabricHTTPTests(unittest.TestCase):

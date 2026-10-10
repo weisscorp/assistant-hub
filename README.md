@@ -26,7 +26,7 @@ flowchart LR
 - Incoming webhooks, isolated incident assessment and durable phone/Coucou notification delivery.
 - Named revocable API keys and an explicit public HTTPS origin behind a trusted reverse proxy.
 - Shared node capability discovery and durable action queue with executor acknowledgements.
-- Persistent Hub timers and topic notifications, accessible through the same model tools.
+- Persistent Hub timers with direct model tools, topic notifications and completion in the Coucou mascot area.
 - Optional computer worker and explicit private LAN/VPN listener address.
 - Durable task queue: serial within a topic, concurrent across topics, cancellation,
   idempotent request IDs, and explicit unknown outcomes after a restart.

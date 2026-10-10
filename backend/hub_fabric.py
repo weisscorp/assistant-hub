@@ -73,11 +73,11 @@ def object_schema(properties=None, required=None):
 
 
 TIMERS = [
-    {'name': 'timer.create', 'description': 'Create a persistent timer in Hub. Fires a topic notification, not a device alarm. Ask for duration if missing.',
-     'inputSchema': object_schema({'duration_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 604800},
+    {'name': 'timer.create', 'description': 'Поставить таймер в Hub (create timer). По завершении — уведомление в теме и у подключённого маскота Coucou. Если длительность не задана, спроси «На сколько поставить таймер?»; не отказывай в этой доступной функции. Это не системный будильник телефона.',
+     'inputSchema': object_schema({'duration_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 604800, 'description': 'Длительность в секундах: пять минут = 300.'},
                                    'label': {'type': 'string', 'maxLength': 160}}, ['duration_seconds'])},
-    {'name': 'timer.list', 'description': 'List current-topic timers with status and remaining seconds.', 'inputSchema': object_schema()},
-    {'name': 'timer.cancel', 'description': 'Cancel a current-topic timer by its exact ID.',
+    {'name': 'timer.list', 'description': 'Список таймеров текущей темы (list timers): статус и сколько секунд осталось.', 'inputSchema': object_schema()},
+    {'name': 'timer.cancel', 'description': 'Отменить таймер текущей темы (cancel timer) по точному ID из timer.list.',
      'inputSchema': object_schema({'timer_id': {'type': 'string', 'maxLength': 36}}, ['timer_id'])},
 ]
 

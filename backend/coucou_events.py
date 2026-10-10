@@ -101,10 +101,13 @@ def wire_event(event, agent='assistant'):
     return data
 
 
-def write_event(path, data, timeout=0.25):
-    """Best-effort single write. True means written, not rendered or acknowledged."""
+def write_event(path, data, timeout=0.25, acknowledge=False):
+    """Single write, optionally wait for upstream's queue acknowledgement.
+
+    Neither a write nor {ok:true} proves the text was rendered or read.
+    """
     path = Path(path)
-    if not path.is_absolute() or not math.isfinite(timeout) or not 0 < timeout <= 5:
+    if not path.is_absolute() or not math.isfinite(timeout) or not 0 < timeout <= 5 or type(acknowledge) is not bool:
         raise ValueError('invalid local socket configuration')
     if not isinstance(data, bytes) or not data.endswith(b'\n') or len(data) > MAX_LINE_BYTES:
         raise ValueError('invalid wire event')
@@ -116,8 +119,18 @@ def write_event(path, data, timeout=0.25):
             client.settimeout(timeout)
             client.connect(os.fspath(path))
             client.sendall(data)
+            if acknowledge:
+                reply = b''
+                while b'\n' not in reply:
+                    chunk = client.recv(256)
+                    if not chunk or len(reply)+len(chunk)>1024:
+                        return False
+                    reply += chunk
+                result = json.loads(reply.split(b'\n',1)[0])
+                if not isinstance(result,dict) or set(result)!={'ok'} or result['ok'] is not True:
+                    return False
         return True
-    except OSError:
+    except (OSError,ValueError):
         # A partial write is uncertain. Retrying could duplicate a sound/state.
         return False
 

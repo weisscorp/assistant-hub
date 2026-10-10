@@ -11,6 +11,19 @@ from knowledge_search import keywords
 TERMINAL = {'completed', 'failed', 'cancelled', 'unknown'}
 
 
+def explicit_duration(prompt):
+    """Check a supplied duration, never invent/execute one from a question.
+
+    Conversion remains the model's job and Fabric validates its numeric range.
+    Anonymous trusted API/MCP calls supply structured parameters directly.
+    """
+    value=prompt.casefold()
+    quantities=r'\d+(?:[.,]\d+)?|один|одна|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|\w+надцать|двадцать|тридцать|сорок|\w+десят|сто|двести|полтора|полторы|one|two|three|four|five|six|seven|eight|nine|ten|a|an'
+    units=r'секунд\w*|минут\w*|час(?:а|ов)?|дн(?:я|ей)|second\w*|minute\w*|hour\w*|day\w*'
+    return bool(re.search(r'\b(?:'+quantities+r')\s+(?:'+units+r')\b',value) or
+                re.search(r'\b(?:на\s+(?:секунду|минуту|час)|полчаса|полминуты|\d{1,2}:\d{2}(?::\d{2})?)\b',value))
+
+
 def schema(name, description, properties, required):
     return {'type': 'function', 'function': {'name': name, 'description': description,
         'parameters': {'type': 'object', 'properties': properties, 'required': required,
@@ -224,11 +237,12 @@ class Coordinator:
         return packet
 
     def node_tools(self, row):
-        """Expose a small set of ordinary typed tools for explicitly named nodes."""
+        """Always expose built-ins; add bounded tools for explicitly named nodes."""
         prompt = row.get('prompt','').casefold()
         result, size = {}, 0
-        for node in self.fabric.hints(prompt):
-            if node['id'].casefold() not in prompt and node['label'].casefold() not in prompt:
+        nodes = [n for n in self.fabric.nodes('hub') if n['id']=='hub'] + [n for n in self.fabric.hints(prompt) if n['id'] != 'hub']
+        for node in nodes:
+            if node['id'] != 'hub' and node['id'].casefold() not in prompt and node['label'].casefold() not in prompt:
                 continue
             catalog = self.fabric.nodes(node['id'],schemas=True)
             for item in catalog:
@@ -323,6 +337,9 @@ class Coordinator:
             elif name == 'capability_call':
                 call_id = str(uuid.uuid5(uuid.NAMESPACE_URL,row['id']+':'+arguments['request_key']))
                 action_arguments = json.loads(arguments['arguments_json'])
+                if (arguments['node']=='hub' and arguments['capability']=='timer.create' and
+                    row.get('prompt') and not explicit_duration(row['prompt'])):
+                    raise ValueError('Длительность не задана пользователем. Спроси «На сколько поставить таймер?». Не придумывай длительность из примеров или прошлых таймеров.')
                 result = self.fabric.call(arguments['node'],arguments['capability'],action_arguments,
                                           context,row['client'],call_id,row['id'])
                 deadline = time.monotonic()+2

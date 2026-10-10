@@ -9,21 +9,48 @@ existing chat connection to the Hub, with no modified application binary.
 ## Built-in timers
 
 Ask, for example, **«Поставь таймер на пять минут»**. If duration is missing, the
-assistant should ask for it. `hub` advertises `timer.create`, `timer.list` and
-`timer.cancel`. The model calls `capabilities_list`, then `capability_call` with
-the advertised input schema. The model tool's `arguments_json` is a string
+assistant should ask for it. A follow-up such as **«на пять минут»** uses the same
+topic's history. `hub` advertises `timer.create`, `timer.list` and `timer.cancel`.
+These three built-ins are always exposed as typed `node_hub_timer_*` model tools,
+including through Coucou's existing `assistant-ollama` connection. There is no
+need to name Hub or discover a catalog first. The ordinary `capabilities_list`
+and `capability_call` path remains available. Its `arguments_json` is a string
 encoding that JSON object; the HTTP/node protocol uses the actual object. This
 keeps the model-facing schema portable across APIs that mishandle free-form
 object fields. A successful response includes the persisted timer
 ID and deadline. No model inference is needed when that deadline arrives.
+
+The model tool path requires a duration in the current user message (common
+Russian/English quantities, units or `HH:MM:SS`); it cannot silently pick five
+minutes from an example or an old timer. If the wording is ambiguous, ask for
+an explicit duration. Trusted direct HTTP/MCP calls without a parent user task
+continue to supply their duration as structured arguments.
+
+Ollama buffers answer drafts before publishing them. A refusal without checking
+tools, or a timer creation/cancellation claim unsupported by current tool results,
+triggers at most two review steps within the existing six-iteration budget.
+Review uses [Ollama structured output](https://docs.ollama.com/capabilities/structured-outputs)
+to select an advertised tool and its schema; a refusal review only permits
+read-only discovery. Actions still pass normal Hub validation and idempotency.
+If the review cannot complete, the request fails visibly instead of reporting
+an invented success. No model receives control of a shell through this path.
 
 Timers last from one second to seven days, belong to a topic and survive process
 restarts. An overdue timer produces exactly one Hub notification when Hub starts
 again. This is a **Hub notification**, not an OS alarm or a phone sound. The UI's
 **Узлы и действия** section lists nodes, action outcomes and current-topic timers,
 and can create/cancel timers directly. Notifications appear under **Уведомления**.
+With `--desktop-notifications` enabled, completion also appears in the original
+Coucou **mascot area**, through its socket hook; there is no native macOS banner.
+The desktop worker waits while Coucou is closed. Trusted timer completions keep
+their original topic, do not invoke a model and do not create webhook incidents.
+They use an indexed incremental cursor and a durable, leased desktop outbox:
+queued notices survive restart; claimed notices with unknown outcomes are not
+replayed. Enabling this feature does not replay historical timer completions.
+`submitted` means the hook was written, not proof the user saw it. Coucou sound
+preferences apply. See [desktop delivery setup](webhooks.md#coucou-mascot-area).
 Cancel a running timer with its exact ID; cancelling a fired timer does not undo
-the notification. Notification consumption by a device requires its adapter.
+the notification. Phone timer alerts are not implemented by this desktop adapter.
 
 ## Connect a computer
 

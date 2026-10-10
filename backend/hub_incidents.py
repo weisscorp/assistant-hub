@@ -11,6 +11,7 @@ import time
 import uuid
 from agent_hub import Conflict, encoded, text, uid
 from hub_providers import request_json
+from hub_notifications import DesktopNotices
 
 MAX_PAYLOAD = 65536
 TARGETS = {'auto','phone','desktop','both'}
@@ -94,8 +95,10 @@ class Incidents:
                     created_at REAL NOT NULL,updated_at REAL NOT NULL,UNIQUE(incident_id,client));
                 CREATE INDEX IF NOT EXISTS incident_delivery_queue ON incident_deliveries(client,status,created_at);
             ''')
+        self.notices = DesktopNotices(store)
 
     def recover(self):
+        self.notices.recover()
         with self.store.connect() as db:
             db.execute("UPDATE incidents SET status='unknown',error='Разбор прервался при перезапуске.',updated_at=? WHERE status='running'",(time.time(),))
             db.execute("UPDATE incident_deliveries SET status='unknown',error='Нет подтверждения доставки; повтор автоматически не отправлен.',updated_at=? WHERE status='running'",(time.time(),))
@@ -258,9 +261,11 @@ class Incidents:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE incident_deliveries SET status='unknown',error='Нет подтверждения доставки.',updated_at=? WHERE status='running' AND expires<?",(time.time(),time.time()))
             row=db.execute("SELECT * FROM incident_deliveries WHERE client=? AND channel='desktop' AND status='queued' ORDER BY created_at LIMIT 1",(text(client,128),)).fetchone()
-            if not row:return None
-            lease=str(uuid.uuid4())
-            db.execute("UPDATE incident_deliveries SET status='running',lease=?,expires=?,updated_at=? WHERE id=?",(lease,time.time()+60,time.time(),row['id']))
+            if row:
+                lease=str(uuid.uuid4())
+                db.execute("UPDATE incident_deliveries SET status='running',lease=?,expires=?,updated_at=? WHERE id=?",(lease,time.time()+60,time.time(),row['id']))
+        # Trusted notices keep their topic and do not enter incident evaluation.
+        if row is None:return self.notices.claim(client)
         return {**self.report(row),'lease':lease,'incident_id':row['incident_id']}
 
     def receipt(self, client, delivery_id, status, lease=None, coucou=False):
@@ -268,7 +273,10 @@ class Incidents:
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM incident_deliveries WHERE id=? AND client=?',(uid(delivery_id),client)).fetchone()
-            if row is None:return {'tracked':False}  # Ordinary mobile answers predate this outbox.
+            if row is None:
+                # Release the transaction before consulting the other outbox.
+                db.commit()
+                return self.notices.receipt(client,delivery_id,status,lease,coucou)
             if row['channel']=='desktop' and (not lease or row['lease']!=uid(lease)):raise Conflict('Delivery lease mismatch')
             result=encoded({'status':status,'coucou_written':coucou})
             # Permission may be granted later; a phone may then post its retained message.
@@ -293,6 +301,7 @@ class Incidents:
             while not self.stop.is_set():
                 try:
                     while not self.stop.is_set() and self.route_one():pass
+                    self.notices.queue(self.clients())
                     for _ in range(20):
                         if self.stop.is_set() or not self.phone_one():break
                 except Exception:pass  # Persisted queue remains inspectable; do not echo payloads.

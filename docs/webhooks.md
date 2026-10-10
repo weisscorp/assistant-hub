@@ -97,15 +97,26 @@ python3 tools/local_stack.py start
 ```
 
 The outbound worker polls the authenticated Hub and sends display-only
-`assistant.message` hooks under agent `hub-events` to the configured
+`SessionStart` then `assistant.message` (`Stop`) hooks under agent `hub-events` to the configured
 `coucou_socket`. It waits while Coucou is closed. The stable device UUID is saved
 in private config. Reports appear in the **mascot area**, with no separate native
 macOS banner or notification helper. Existing Coucou sound preferences apply.
 Coucou 0.2.3 may shorten the visible preview; the complete report remains in Hub.
+The same worker delivers new Hub timer completions through the same mascot hook.
+These trusted notices retain their existing topic and bypass incident evaluation.
+Old timer completions are not replayed when upgrading. See [timers](capabilities.md#built-in-timers).
 
 For another Mac, run `backend/hub_desktop.py --url HUB_URL --token-file KEY_FILE
 --id desktop:unique-name --device STABLE_UUID --coucou-socket SOCKET_PATH`.
 The display worker receives no executable actions.
+
+[Coucou 0.2.3's hook receiver](https://github.com/Louis-CFM/coucou/blob/v0.2.3/NotchBuddy/Sources/App/HookServer.swift)
+needs the session-start event to create an external agent card: `Stop` alone
+only updates an existing card. Each hook uses a separate connection, with the
+receiver's `{ok:true}` queue acknowledgement before sending the next. This is
+still not a rendering/read receipt. If either connection is uncertain, no hook
+is retried. Depending on the current Coucou focus, completion appears as its
+finished preview or a badge in the mascot area; the full text remains in Hub.
 
 ## Android
 

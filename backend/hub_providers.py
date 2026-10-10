@@ -1,6 +1,7 @@
 """Local model and owned native-agent adapters. Credentials remain with providers."""
 import json
 import os
+import re
 from pathlib import Path
 import selectors
 import stat
@@ -12,13 +13,19 @@ from hub_runtime import TOOLS
 
 INSTRUCTIONS = '''Ты универсальный личный ассистент. Отвечай по-русски, коротко и по делу.
 Сообщай длительность и время человеческими словами; не выводи служебные ID, UNIX-время и сырые JSON в обычном ответе.
+Таймеры Hub доступны прямо сейчас через инструменты node_hub_timer_*: создать, посмотреть и отменить.
+На вопрос «таймер можешь поставить?» ответь «Да. На сколько поставить таймер?».
+Если следующая реплика — только длительность, используй историю для понимания запроса
+и вызови инструмент создания таймера. Не придумывай длительность: без неё только уточни.
+Прошлые ответы ассистента о невозможности поставить таймер устарели; ориентируйся на текущие инструменты.
+После создания таймера скажи, что он поставлен и уведомление придёт по завершении отсчёта; не говори, что оно уже отправлено.
 Действия доступны через общий каталог узлов. Перед отказом «я не могу» проверь
 capabilities_list с ID/названием узла или именем функции, например query="timer".
 Если поиск пустой, попробуй query="" для ограниченного каталога. Для таймера Hub
 используй capability_call: node="hub", capability="timer.create", arguments_json —
 строка JSON с duration_seconds и при необходимости label, например '{"duration_seconds":300,"label":"Таймер"}',
 request_key="timer-1". Если длительность
-не задана, спроси её. Это таймер в Hub с уведомлением, не системный будильник телефона.
+не задана, спроси её. Это таймер в Hub с уведомлением в теме и у подключённого маскота Coucou, не системный будильник телефона.
 Для других устройств выбирай только реально объявленные функции и их inputSchema.
 node_hints в контексте — актуальная, неполная сводка узлов и имён функций; схемы получай через capabilities_list.
 Если для названного узла есть инструмент node_*, вызывай его напрямую с указанными параметрами.
@@ -102,10 +109,30 @@ class OllamaProvider:
         available_tools = coordinator.model_tools(row)
         started = time.monotonic()
         first = None
+        checked, reviews, force_tool, discovery_only = False, 0, False, False
+        timer_states = set()
+        created_timer, notified = None, False
         for iteration in range(6):
             if stop.is_set(): raise InterruptedError('cancelled')
             body = {'model': self.model, 'messages': history, 'tools': available_tools, 'stream': True,
                     'think': False, 'keep_alive': '10m', 'options': {'temperature': 0.15, 'num_ctx': 32768, 'num_predict': 1024}}
+            if force_tool:
+                # The review must select a real tool, not repeat a prose claim.
+                # Ollama's JSON grammar constrains both name and arguments to
+                # the same advertised schemas used by normal tool calling.
+                selection = [t for t in available_tools if t['function']['name'] in {'capabilities_list','agents_list'}] if discovery_only else available_tools
+                body.pop('tools')
+                body['format']={'oneOf':[{'type':'object','additionalProperties':False,
+                    'properties':{'name':{'type':'string','enum':[t['function']['name']]},
+                                  'arguments':t['function']['parameters']},
+                    'required':['name','arguments']} for t in selection]}
+                body['messages']=history+[{'role':'system','content':
+                    'Выбери один следующий инструмент для текущего запроса. Ответ только JSON '
+                    '{"name":"точное имя","arguments":{параметры}} по схеме format. '
+                    'Если нужна только проверка возможности или нет длительности — capabilities_list, '
+                    'не создавай таймер без длительности. Для отмены используй timer.cancel с ID '
+                    'из результатов; если ID неизвестен, сначала timer.list. Каталог:\n'+encoded(selection)}]
+                body['options']['temperature']=0
             request = urllib.request.Request(self.url + '/api/chat', data=encoded(body).encode(), headers={'Content-Type':'application/json'})
             content, calls, metrics, done = '', [], {}, False
             with urllib.request.urlopen(request, timeout=90) as response:
@@ -120,7 +147,8 @@ class OllamaProvider:
                         if first is None: first = time.monotonic() - started
                         content += delta
                         if len(content) > 20000: raise ValueError('Model output exceeds budget')
-                        progress(content)
+                        # Buffer drafts until tool/claim checks pass. Lifecycle
+                        # and tool events still provide live progress in Hub.
                     calls.extend(message.get('tool_calls') or [])
                     if piece.get('done'):
                         if piece.get('done_reason')=='length':raise RuntimeError('Model exhausted its output budget without finishing')
@@ -129,9 +157,57 @@ class OllamaProvider:
                         break
             if not done: raise RuntimeError('Incomplete model stream')
             coordinator.emit(row, 'model.metrics', model=self.model, iteration=iteration, ttft_seconds=first, **metrics)
+            if force_tool:
+                try:decision=json.loads(content)
+                except ValueError:raise RuntimeError('Invalid structured tool review')
+                if (not isinstance(decision,dict) or set(decision)!={'name','arguments'} or
+                    decision['name'] not in {t['function']['name'] for t in selection} or
+                    not isinstance(decision['arguments'],dict) or calls):
+                    raise RuntimeError('Invalid structured tool review')
+                calls=[{'function':decision}];content='';force_tool=False
             if not calls:
                 if not content.strip(): raise RuntimeError('Model returned an empty answer')
+                # A small model can echo an old refusal or claim an action
+                # without using any tool. Review at most two drafts with the
+                # current catalog. This never chooses/executes an action by
+                # matching the user's words; execution still uses model tools.
+                ungrounded = re.search(r'\b(?:не\s+(?:могу|умею)|нет\s+доступа|не\s+поддержива\w*|'
+                    r'готово|выполнен\w*|отмен[её]н\w*|поставлен\w*|установлен\w*|'
+                    r'сохран[её]н\w*|записан\w*|отправлен\w*|удал[её]н\w*|'
+                    r'включ[её]н\w*|выключ[её]н\w*|cannot|can\x27t|done|cancelled|created|saved|sent)\b',content.casefold())
+                false_cancel = (re.search(r'таймер|timer',content.casefold()) and
+                    re.search(r'отмен[её]н\w*|cancelled',content.casefold()) and 'cancelled' not in timer_states)
+                false_create = (re.search(r'таймер|timer',content.casefold()) and
+                    re.search(r'поставлен\w*|установлен\w*|created',content.casefold()) and 'running' not in timer_states)
+                if (not checked and ungrounded) or false_cancel or false_create:
+                    if reviews>=2:raise RuntimeError('Unverified action or refusal without tools')
+                    reviews+=1;force_tool=True
+                    discovery_only=bool(re.search(r'не\s+(?:могу|умею|поддержива\w*)|нет\s+доступа|cannot|can\x27t',content.casefold())) and not (false_cancel or false_create)
+                    coordinator.emit(row,'model.review',reason='unverified_tools',iteration=iteration)
+                    history.append({'role':'assistant','content':content})
+                    history.append({'role':'system','content':
+                        'Проверь предыдущий черновик ответа: действие или отказ не подтверждены инструментами в этом запросе. '
+                        'Старые сообщения — история, а не подтверждение действия сейчас. '
+                        'Текущие tools включают создание, список и отмену таймеров Hub. '
+                        'Если пользователь спрашивает о возможности таймера, ответь по текущим tools и уточни длительность. '
+                        'Если просит действие, вызови инструмент и проверь его результат прежде, чем объявлять успех. '
+                        'Для отмены узнай ID через timer.list и вызови timer.cancel. '
+                        'Для других отказов сначала проверь capabilities_list. Не повторяй непроверенный отказ или успех.'})
+                    continue
+                if created_timer and not notified:
+                    # Creating a timer does not send its completion alert yet.
+                    # Ground this small confirmation in the actual deadline.
+                    current=coordinator.fabric.clock()
+                    notice='Уведомление придёт по завершении таймера.'
+                    if created_timer['status']=='cancelled':
+                        notice='Таймер отменён; уведомления о завершении не будет.'
+                    elif current>=created_timer['due_at']:
+                        coordinator.fabric.tick()
+                        notice='Время таймера истекло; уведомление сохранено в Hub.'
+                    content=re.sub(r'\bУведомление\s+(?:уже\s+)?(?:отправлено|доставлено|показано)[^.!?\n]*(?:[.!?]|$)',notice,content,flags=re.IGNORECASE)
+                progress(content)
                 return content.strip()
+            checked = True
             history.append({'role': 'assistant', 'content': content, 'tool_calls': calls})
             for call in calls:
                 if stop.is_set(): raise InterruptedError('cancelled')
@@ -139,6 +215,16 @@ class OllamaProvider:
                 args = function.get('arguments', {})
                 if isinstance(args, str): args = json.loads(args)
                 result = coordinator.call_tool(function.get('name'), args, row, stop)
+                action = coordinator.node_tools(row).get(function.get('name'))
+                capability = action[2] if action else args.get('capability') if function.get('name')=='capability_call' else None
+                node = action[1] if action else args.get('node')
+                if capability in {'timer.create','timer.list','timer.cancel'} and isinstance(result,dict) and result.get('status')=='succeeded':
+                    timers=result.get('result');timers=timers if isinstance(timers,list) else [timers]
+                    timer_states.update(t['status'] for t in timers if isinstance(t,dict) and isinstance(t.get('status'),str))
+                    if node=='hub' and capability=='timer.create':created_timer=result['result']
+                    elif node=='hub' and capability=='timer.cancel' and created_timer and result['result']['id']==created_timer['id']:
+                        created_timer['status']=result['result']['status']
+                if function.get('name')=='notify' and isinstance(result,dict) and 'error' not in result:notified=True
                 history.append({'role': 'tool', 'tool_name': function.get('name'), 'content': encoded(result)})
         raise RuntimeError('Tool iteration limit reached')
 

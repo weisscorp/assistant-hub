@@ -7,7 +7,8 @@ Host/Origin checks reject arbitrary origins. This is a single-owner API.
 Named, revocable client keys and a trusted HTTPS reverse proxy are supported;
 see [API keys and Internet access](internet-access.md). Secrets belong in the
 Bearer header, not a URL. Owner keys have full access; webhook keys can only
-publish events.
+publish events. MCP-scoped keys and OAuth grants can only access `/mcp` and its
+bounded request tools; they cannot use the owner task, memory or node HTTP APIs.
 
 | Method/path | Role |
 |---|---|
@@ -17,6 +18,8 @@ publish events.
 | POST `/api/focus` | `client`, `context_id`, expected `revision` |
 | POST `/api/messages` | UUID `id`, `context_id`, `client`, `provider`, `prompt` |
 | GET `/api/tasks/UUID` | Durable task state/output/error |
+| GET `/api/dot/status` | Enabled flag, active subscriptions and pending count |
+| POST `/mcp` | MCP JSON-RPC tools and Events; owner or MCP-scoped credential |
 | POST `/api/cancel` | Cancel task `id` |
 | GET `/api/nodes?query=TEXT&schemas=1` | Nodes and bounded advertised schemas |
 | GET `/api/tools?task=UUID&context=UUID` | Task-bound generic and typed node tools |
@@ -55,7 +58,12 @@ does not authorize other API paths and is accepted only on direct loopback,
 never through the public HTTPS origin. Failed authentication returns 401;
 repeated failures return 429 with Retry-After. Public cookies use Secure.
 
-Providers implement `status()` and `run(task, coordinator, cancel, emit)` in
+See [dot integration](dot-integration.md) for event discovery, subscription,
+callback signatures, OAuth metadata/routes and `submit_result`. The dot provider
+is deferred: `enqueue` persists work and a later MCP call completes its task.
+External waiting does not hold the topic execution lock.
+
+Runtime providers implement `status()` and `run(task, coordinator, cancel, emit)` in
 `hub_providers.py`. Implement a new adapter there and register its config type
 in `HubApplication`. Record native IDs and terminal status honestly; never turn
 a failed tool or timed-out process into a successful assistant reply.

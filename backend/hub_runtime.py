@@ -178,10 +178,25 @@ class RuntimeStore(HubStore):
                 db.execute('INSERT INTO notifications VALUES(:id,:context_id,:source,:body,:created_at)', notice)
             return value
 
-    def recover(self):
+    def finish_external(self, db, task_id, reply, error):
+        """Finish a dot task inside the caller's transaction (including its deduplication record)."""
+        row = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+        now = time.time()
+        status = 'failed' if error else 'completed'
+        db.execute('UPDATE tasks SET status=?,output=?,error=?,updated_at=? WHERE id=?', (status,reply,error,now,task_id))
+        self._event(db, 'task.'+status, row['context_id'], task_id, {'status':status,'output':reply,'error':error})
+        body = reply or error
+        db.execute('INSERT INTO entries(id,context_id,role,source,body,created_at) VALUES(?,?,?,?,?,?)',
+                   (str(uuid.uuid4()),row['context_id'],'assistant',row['provider'],body,int(now)))
+        db.execute('INSERT INTO notifications VALUES(?,?,?,?,?)',
+                   (str(uuid.uuid4()),row['context_id'],row['provider'],body[:4000],int(now)))
+
+    def recover(self, preserve_providers=()):
         # Never replay a provider/tool operation with an uncertain outcome.
         with self.connect() as db:
-            pending=[r['id'] for r in db.execute("SELECT id FROM tasks WHERE status NOT IN ('completed','failed','cancelled','unknown')")]
+            external = {r['id'] for r in db.execute('SELECT id FROM dot_requests')} if db.execute("SELECT 1 FROM sqlite_master WHERE name='dot_requests'").fetchone() else set()
+            pending=[r['id'] for r in db.execute("SELECT id,provider FROM tasks WHERE status NOT IN ('completed','failed','cancelled','unknown')")
+                     if r['provider'] not in preserve_providers or r['id'] not in external]
         for task_id in pending:
             self.update(task_id, 'unknown', error='Hub был перезапущен. Результат незавершённого запроса неизвестен; автоматического повтора нет.')
 
@@ -194,6 +209,7 @@ class Coordinator:
         self.lock = threading.RLock()
         self.active = {}
         self.context_locks = {}
+        self.external_guard = threading.RLock()
 
     def submit(self, context, client, provider, prompt, task_id=None):
         if provider not in self.providers: raise ValueError('Provider is not configured')
@@ -206,11 +222,12 @@ class Coordinator:
             return row
 
     def cancel(self, task_id):
-        row = self.store.task(task_id)
-        with self.lock:
-            if task_id in self.active: self.active[task_id].set()
-        self.fabric.cancel_task(task_id)
-        return self.store.update(task_id, 'cancelled', error='Запрос остановлен пользователем.')
+        with self.external_guard:
+            row = self.store.task(task_id)
+            with self.lock:
+                if task_id in self.active: self.active[task_id].set()
+            self.fabric.cancel_task(task_id)
+            return self.store.update(task_id, 'cancelled', error='Запрос остановлен пользователем.')
 
     def emit(self, row, kind, **data):
         self.store.event(kind, row['context_id'], row['id'], **data)
@@ -266,6 +283,7 @@ class Coordinator:
         return TOOLS+[item[0] for item in self.node_tools(row).values()]
 
     def _run(self, row, stop):
+        deferred = False
         with self.lock: context_lock = self.context_locks.setdefault(row['context_id'], threading.Lock())
         try:
             with context_lock:
@@ -280,6 +298,13 @@ class Coordinator:
                         self.store.update(row['id'], output=value[-20000:])
                         last[0] = time.monotonic()
                 direct=self.codex.voice(row['prompt'],row['client'],row['context_id'],row['id']) if getattr(self,'codex',None) else None
+                provider = self.providers[row['provider']]
+                if direct is None and getattr(provider, 'deferred', False):
+                    with self.external_guard:
+                        if stop.is_set(): return
+                        provider.enqueue(row, self)
+                        deferred = True
+                    return
                 reply = direct if direct is not None else self.providers[row['provider']].run(row, self, stop, progress).strip()
                 if stop.is_set(): return
                 text(reply, 20000)
@@ -296,7 +321,7 @@ class Coordinator:
             import sys
             print('hub task failed: ' + row['provider'] + ' ' + type(error).__name__, file=sys.stderr, flush=True)
         finally:
-            self.emit(row, 'session.ended')
+            if not deferred: self.emit(row, 'session.ended')
             with self.lock: self.active.pop(row['id'], None)
 
     def call_tool(self, name, arguments, row, stop=None):

@@ -17,6 +17,8 @@ from hub_runtime import Coordinator, RuntimeStore, TERMINAL
 from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
 from hub_network import bind_ip, authority, ProxyOrigin
 from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited, Forbidden
+from hub_mcp_events import McpEvents, DotProvider
+from hub_mcp_oauth import McpOAuth, OAuthError
 
 
 def private_json(path):
@@ -32,7 +34,8 @@ class HubApplication:
         self.config = config
         self.proxy = ProxyOrigin(config)
         self.store = RuntimeStore(config['state'])
-        self.store.recover()
+        preserve = [name for name,value in config['providers'].items() if value.get('type')=='mcp_events'] if config.get('mcp_events') is not None else []
+        self.store.recover(preserve)
         token_path=Path(config['token_file']);token_info=token_path.lstat()
         if not stat.S_ISREG(token_info.st_mode) or token_info.st_uid!=os.getuid() or token_info.st_mode&0o077 or token_info.st_size>8192:
             raise ValueError('Token must be an owned private regular file')
@@ -51,6 +54,7 @@ class HubApplication:
             elif value['type'] == 'command': self.providers[name] = CommandProvider(value['argv'], value['label'],value.get('log_file'))
             elif value['type'] == 'orchestrator': self.providers[name] = OrchestratorProvider(value)
             elif value['type'] == 'cloud': self.providers[name] = CloudProvider(value)
+            elif value['type'] == 'mcp_events': self.providers[name] = DotProvider(value.get('agent_id','personal-dot'))
             else: raise ValueError('Unknown provider type')
         self.coordinator = Coordinator(self.store, self.providers, self.coucou)
         self.fabric = self.coordinator.fabric
@@ -61,6 +65,8 @@ class HubApplication:
         from hub_codex import CodexLink
         self.codex = CodexLink(self.store,self.incidents,config.get('codex_link'))
         self.coordinator.codex = self.codex
+        self.mcp = McpEvents(self, config.get('mcp_events'))
+        self.oauth = McpOAuth(self)
         self.lock = threading.RLock()
         self.cached_status, self.status_at = {}, 0
 
@@ -135,13 +141,16 @@ class HubHandler(BaseHTTPRequestHandler):
             self.request_origin = 'http://' + supplied_host
         origin = self.headers.get('Origin')
         if origin and origin != self.request_origin: raise PermissionError('Invalid origin')
-        if self.headers.get('Sec-Fetch-Site') == 'cross-site': raise PermissionError('Invalid origin')
+        oauth_navigation = getattr(self,'command',None)=='GET' and urllib.parse.urlsplit(getattr(self,'path','')).path=='/oauth/authorize'
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not oauth_navigation: raise PermissionError('Invalid origin')
 
     def authorized(self):
         header = self.headers.get('Authorization')
         # An explicitly supplied wrong bearer must not fall back to a browser cookie.
         if header is not None:
-            return self.app.auth.resolve(header[7:]) if header.startswith('Bearer ') else None
+            if not header.startswith('Bearer '): return None
+            secret = header[7:]
+            return self.app.auth.resolve(secret) or self.app.oauth.resolve(secret)
         try:
             c = SimpleCookie(self.headers.get('Cookie','')); value = c.get('hub_session')
             if self.command == 'POST' and self.headers.get('Origin') != self.request_origin:
@@ -160,6 +169,18 @@ class HubHandler(BaseHTTPRequestHandler):
         result = json.loads(self.rfile.read(length))
         if not isinstance(result, dict): raise ValueError('Expected a JSON object')
         return result
+
+    def form(self):
+        if self.headers.get('Transfer-Encoding'):raise ValueError('Chunked forms are not supported')
+        if self.headers.get('Content-Type','').split(';')[0]!='application/x-www-form-urlencoded':
+            raise ValueError('Expected form encoding')
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0<length<=8192:raise ValueError('Invalid form size')
+        raw=self.rfile.read(length)
+        if len(raw)!=length:raise ValueError('Incomplete form')
+        values=urllib.parse.parse_qs(raw.decode('utf-8'),keep_blank_values=True,max_num_fields=20)
+        if any(len(items)!=1 for items in values.values()):raise ValueError('Duplicate form parameter')
+        return {key:items[0] for key,items in values.items()}
 
     def reply(self, value, status=200, headers=None, mime='application/json; charset=utf-8'):
         body = value if isinstance(value, bytes) else encoded(value).encode('utf-8')
@@ -181,6 +202,22 @@ class HubHandler(BaseHTTPRequestHandler):
             if url.scheme or url.netloc: raise ValueError('Expected a relative request path')
             path, query = url.path, urllib.parse.parse_qs(url.query)
             get = lambda key, default=None: query.get(key,[default])[0]
+            if path in {'/.well-known/oauth-authorization-server','/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'} and method=='GET':
+                return self.reply(self.app.oauth.metadata(resource='oauth-protected-resource' in path))
+            if path=='/oauth/register' and method=='POST':
+                return self.reply(self.app.oauth.register(self.body()),201)
+            if path=='/oauth/token' and method=='POST':
+                return self.reply(self.app.oauth.exchange(self.form()))
+            if path=='/oauth/authorize':
+                if method=='GET':
+                    if any(len(items)!=1 for items in query.values()):raise ValueError('Duplicate OAuth parameter')
+                    page,nonce=self.app.oauth.consent({key:items[0] for key,items in query.items()})
+                    cookie=f'hub_oauth_consent={nonce}; HttpOnly; SameSite=Lax; Path=/oauth/authorize; Max-Age=300'+('; Secure' if self.public_request else '')
+                    return self.reply(page,headers={'Set-Cookie':cookie,'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"},mime='text/html; charset=utf-8')
+                if self.headers.get('Origin')!=self.request_origin:raise PermissionError('Same-origin consent required')
+                form=self.form();cookie=SimpleCookie(self.headers.get('Cookie',''));nonce=cookie.get('hub_oauth_consent')
+                location=self.app.oauth.approve(form.get('nonce'),nonce.value if nonce else None,form.get('token'))
+                return self.reply(b'',303,{'Location':location,'Set-Cookie':'hub_oauth_consent=; HttpOnly; SameSite=Lax; Path=/oauth/authorize; Max-Age=0'})
             if path in {'/','/app.js','/app.css'} and method == 'GET':
                 filename = {'/':'index.html','/app.js':'app.js','/app.css':'app.css'}[path]
                 mime = {'/':'text/html','/app.js':'text/javascript','/app.css':'text/css'}[path]
@@ -189,7 +226,7 @@ class HubHandler(BaseHTTPRequestHandler):
                 body = self.body()
                 principal = self.app.auth.resolve(body.get('token'))
                 if not principal: self.app.auth_failures.reject(self.auth_peer)
-                if self.app.auth.scope(principal)!='owner':raise Forbidden('Этот ключ может только отправлять вебхуки')
+                if self.app.auth.scope(principal)!='owner':raise Forbidden('Для входа нужен ключ владельца Hub')
                 return self.reply({'ok':True},headers={'Set-Cookie':self.session_cookie(principal)})
             if path == '/ticket' and method == 'GET':
                 principal = self.app.browser.resolve(get('id',''), self.request_origin, ticket=True)
@@ -209,6 +246,13 @@ class HubHandler(BaseHTTPRequestHandler):
             if not principal and not coucou_access: self.app.auth_failures.reject(self.auth_peer)
             if principal and self.app.auth.scope(principal)=='webhook' and (method,path)!=('POST','/webhooks/events'):
                 raise Forbidden('Этот ключ может только отправлять вебхуки')
+            if principal and self.app.auth.scope(principal)=='mcp' and path!='/mcp':
+                raise Forbidden('Этот ключ предназначен только для MCP-инструментов dot')
+            if path=='/mcp':
+                self.app.mcp.require(principal)
+                if method!='POST': return self.reply({'error':'Use MCP POST transport'},405,{'Allow':'POST'})
+                result = self.app.mcp.rpc(principal,self.body())
+                return self.reply(b'',202) if result is None else self.reply(result)
             if path=='/webhooks/events' and method=='POST':
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=65536:raise ValueError('Webhook payload must be 1..65536 bytes')
@@ -235,6 +279,7 @@ class HubHandler(BaseHTTPRequestHandler):
                         'notifications':s.notifications()[-60:], 'coucou':{'socketConfigured':bool(self.app.config.get('coucou_socket'))}})
                 if path == '/api/events': return self.reply(s.events(int(get('after','0')), get('context')))
                 if path == '/api/incidents':return self.reply(self.app.incidents.list())
+                if path == '/api/dot/status':return self.reply(self.app.mcp.status())
                 if path == '/api/codex/chats':return self.reply(self.app.codex.list(get('query','')))
                 if path == '/api/codex/status':return self.reply({'enabled':self.app.codex.enabled,'error':self.app.codex.last_error})
                 if path == '/api/codex/commands':return self.reply(self.app.codex.commands(get('client','desktop'),uid(get('context'))))
@@ -314,6 +359,7 @@ class HubHandler(BaseHTTPRequestHandler):
                 if path == '/conversation': return self.reply(self.app.mobile.turn(body))
             self.reply({'error':'Unknown endpoint'},404)
         except Conflict as error: self.reply({'error':str(error)},409)
+        except OAuthError as error: self.reply({'error':str(error)},400)
         except Forbidden as error:
             self.close_connection=True
             self.reply({'error':str(error)},403,{'Connection':'close'})
@@ -322,7 +368,10 @@ class HubHandler(BaseHTTPRequestHandler):
             self.reply({'error':str(error)},429,{'Retry-After':'60','Connection':'close'})
         except PermissionError as error:
             self.close_connection = True
-            self.reply({'error':str(error)},401,{'WWW-Authenticate':'Bearer realm="assistant-hub"','Connection':'close'})
+            challenge='Bearer realm="assistant-hub"'
+            if urllib.parse.urlsplit(self.path).path=='/mcp' and self.app.oauth.enabled():
+                challenge+=', resource_metadata="'+self.app.oauth.issuer+'/.well-known/oauth-protected-resource/mcp"'
+            self.reply({'error':str(error)},401,{'WWW-Authenticate':challenge,'Connection':'close'})
         except (ValueError, KeyError, TypeError) as error:
             self.close_connection = True
             self.reply({'error':str(error)[:500]},400,{'Connection':'close'})
@@ -400,6 +449,7 @@ def main():
     app.fabric.start()
     app.incidents.start()
     app.codex.start()
+    app.mcp.start()
     server_type = ThreadingHTTPServer
     if host.version == 6:
         class IPv6Server(ThreadingHTTPServer):
@@ -411,12 +461,13 @@ def main():
     import signal
     def shutdown(*_):
         for row in app.store.tasks():
-            if row['status'] not in TERMINAL: app.coordinator.cancel(row['id'])
+            if row['status'] not in TERMINAL and not getattr(app.providers.get(row['provider']),'deferred',False): app.coordinator.cancel(row['id'])
         threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,shutdown)
     try: server.serve_forever()
     finally:
         app.codex.close()
+        app.mcp.close()
         app.fabric.close()
         app.incidents.close()
         server.server_close()

@@ -39,7 +39,7 @@ def main():
     make = sub.add_parser('create')
     make.add_argument('name')
     make.add_argument('--output', type=Path, required=True)
-    make.add_argument('--scope',choices=['owner','webhook'],default='owner',help='webhook can only POST events; owner has full API access')
+    make.add_argument('--scope',choices=['owner','webhook','mcp'],default='owner',help='webhook: event producer; mcp: dot request tools only; owner: full API')
     sub.add_parser('list')
     revoke = sub.add_parser('revoke')
     revoke.add_argument('id', help='Public UUID from list; not the secret')

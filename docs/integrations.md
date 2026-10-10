@@ -5,6 +5,14 @@ Start with the [core quick start](../README.md). All runtime files below are in
 Hub after changing its private configuration. Configure providers you actually
 intend to use; the launcher does not install upstream applications for you.
 
+## OpenAI dot
+
+Enable the optional asynchronous provider with
+`python3 tools/local_stack.py setup --dot-events`, then follow the
+[MCP Events, plugin, OAuth and tunnel instructions](dot-integration.md).
+Requests use Hub's existing task/context store; the dot returns its answer with
+`submit_result`. A real dot subscription and reachable transport are required.
+
 ## Ollama
 
 Install/start Ollama from its [official project](https://github.com/ollama/ollama).

@@ -5,9 +5,11 @@ request. It still binds only a literal loopback/private/VPN address. The login
 page and its static JS/CSS are public; history, knowledge, tools, health, models,
 mobile sync and conversations require authentication.
 
-This is a **single-owner** service. Each key grants the same owner's full API
+This is a **single-owner** service. Each owner key grants full API
 access, including configured agents and node actions; keys are not separate user
 accounts or per-node grants. Issue them only to your own trusted clients.
+Webhook keys can only publish incidents; MCP keys/grants can only access the
+[dot MCP endpoint](dot-integration.md) and its bounded tools for active requests.
 
 ## Create a client key
 
@@ -27,7 +29,8 @@ the command. Creation writes a **new** mode-0600 file, refuses overwrites/symlin
 and prints only the key ID, name and path. The random secret is not printed or
 stored in conversations. Only its SHA-256 digest is stored in private SQLite.
 There is a limit of 128 active client keys. Creation/revocation is local CLI
-administration; no HTTP endpoint issues secrets.
+administration; no owner HTTP endpoint issues API keys. The optional dot OAuth
+flow issues separate access/refresh tokens only after owner consent.
 
 Send the secret as `Authorization: Bearer <key>`, including for the standard
 `/v1/models` and `/v1/chat/completions` facade. Keys in query strings are ignored.

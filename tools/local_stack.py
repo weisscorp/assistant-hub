@@ -41,6 +41,9 @@ def configure(args):
         'host':'127.0.0.1','port':8778,'state':str(root/'state'),'token_file':str(root/'token'),
         'coucou_socket':str(Path.home()/'Library/Application Support/NotchBuddy/nb.sock'),
         'providers':{'ollama':{'type':'ollama','url':'http://127.0.0.1:11434','model':'qwen3:4b-instruct-2507-q4_K_M'}}}
+    if getattr(args,'dot_events',False):
+        config['mcp_events'] = config.get('mcp_events') or {'request_timeout':300}
+        config['providers'].setdefault('dot',{'type':'mcp_events','agent_id':'personal-dot'})
     binary=shutil.which('codex')
     if binary and 'codex' not in config['providers']:
         config['providers']['codex']={'type':'codex','binary':binary,'workspace':str(root/'agents/codex')}
@@ -192,6 +195,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--directory',type=Path,default=DEFAULT)
     sub=p.add_subparsers(dest='command',required=True)
     setup=sub.add_parser('setup');setup.add_argument('--hermes-root',type=Path);setup.add_argument('--hermes-python',type=Path)
+    setup.add_argument('--dot-events',action='store_true',help='Enable the asynchronous OpenAI dot MCP Events provider; requires a plugin subscription')
     setup.add_argument('--local-node',action='store_true',help='Enable a local node with read-only system.info/system.time')
     setup.add_argument('--desktop-notifications',action='store_true',help='Display incident reports in the Coucou mascot area')
     setup.add_argument('--codex-link',action='store_true',help='Observe native Codex completions and enable explicit voice continuations')

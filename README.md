@@ -28,7 +28,7 @@ flowchart LR
 - Shared node capability discovery and durable action queue with executor acknowledgements.
 - Persistent Hub timers with direct model tools, topic notifications and completion in the Coucou mascot area.
 - Optional computer worker and explicit private LAN/VPN listener address.
-- Durable task queue: serial within a topic, concurrent across topics, cancellation,
+- Durable task queue: runtime providers serial within a topic, concurrent across topics, cancellation,
   idempotent request IDs, and explicit unknown outcomes after a restart.
 - Shared facts with revisions, topic-local facts, paginated history and agent session references.
 - **Automatic indexed recall in code** before a model request: SQLite FTS5 selects
@@ -36,6 +36,9 @@ flowchart LR
 - Memory tools that instruct agents to save durable user facts automatically.
   Actual saving still depends on a successful model tool call.
 - Ollama, native Codex, official Hermes through MCP, and Agent Orchestrator adapters.
+- Optional asynchronous OpenAI dot provider through MCP Events, with request-bound
+  tools, durable callbacks and result submission. HTTPS OAuth or a private stdio
+  tunnel relay; real dot subscription still requires setup and validation.
 - Native Codex completion reports through the incident outbox, with explicit
   voice/text task selection and continuation.
 - Original Coucou connected through an OpenAI-compatible local provider facade
@@ -79,6 +82,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 ## Connect components
 
 - [Coucou, Codex, Hermes, Agent Orchestrator and cloud setup](docs/integrations.md)
+- [OpenAI dot, MCP Events, OAuth and private tunnel setup](docs/dot-integration.md)
 - [Shared memory, indexed search and history](docs/memory.md)
 - [Connected nodes, actions, timers and VPN transport](docs/capabilities.md)
 - [Android connection contract and current gaps](docs/android.md)

@@ -39,7 +39,7 @@ class AccessKeys:
                 db.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'owner'")
 
     def issue(self, name, scope='owner'):
-        if scope not in {'owner','webhook'}:raise ValueError('Invalid API key scope')
+        if scope not in {'owner','webhook','mcp'}:raise ValueError('Invalid API key scope')
         name = text(name, 128).strip()
         secret = 'hub_' + secrets.token_urlsafe(48)
         row = {'id':str(uuid.uuid4()), 'name':name, 'created_at':time.time(), 'revoked_at':None,'scope':scope}

@@ -1,0 +1,15 @@
+.git
+**/__pycache__
+**/*.pyc
+.venv
+data
+runtime
+releases
+verification
+artifacts
+*.key
+*.pem
+*.keystore
+*.apk
+*.env
+config.json

@@ -18,10 +18,11 @@ import ssl
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 from build_release import build_release
-from make_release import MAX_APK, digest, sync_directory
+from make_release import MAX_APK, digest, stage, sync_directory
 
 ARTIFACT = re.compile(r'helmet-([1-9][0-9]*)-([a-f0-9]{16})\.apk')
 
@@ -95,41 +96,116 @@ class Artifacts:
         return {**value, 'sizeBytes': size, 'channel': 'dev'}
 
 
-def handler(artifacts, token):
-    if not isinstance(token, str) or not 32 <= len(token) <= 512 or any(c.isspace() for c in token):
+def bearer(token):
+    if not isinstance(token, str) or not 32 <= len(token) <= 512 or not token.isascii() or any(c.isspace() for c in token):
         raise ValueError('Expected a random single-line OTA key')
-    credential = ('Bearer ' + token).encode()
+    return ('Bearer ' + token).encode('ascii')
+
+
+class Publisher:
+    """Independent upload credential; release verification never trusts request metadata."""
+    def __init__(self, token, build_tools, certificate):
+        self.credential = bearer(token)
+        self.build_tools = Path(build_tools)
+        if not re.fullmatch('[a-f0-9]{64}', certificate):
+            raise ValueError('Expected the provisioned signing certificate SHA-256')
+        self.certificate = certificate
+        self.lock = threading.Lock()
+
+
+def handler(artifacts, token, publisher=None):
+    credential = bearer(token)
+    if publisher and hmac.compare_digest(credential, publisher.credential):
+        raise ValueError('Download and publication keys must be different')
     class Handler(BaseHTTPRequestHandler):
         server_version = 'AssistantDevOTA/1'
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(30)
         def log_message(self, *_): pass
         def reply(self, code, body):
             data = json.dumps(body).encode()
+            self.close_connection = True
             self.send_response(code); self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data))); self.send_header('Cache-Control', 'no-store')
+            self.send_header('Connection', 'close')
             self.send_header('X-Content-Type-Options', 'nosniff'); self.end_headers(); self.wfile.write(data)
-        def do_GET(self):
-            self.connection.settimeout(30)
+        def framing(self):
+            # Reject ambiguity before reading any body (including an empty TE header).
+            names = [name.lower() for name in self.headers.keys()]
+            return len(names) == len(set(names)) and 'Transfer-Encoding' not in self.headers
+        def authorized(self, expected):
             headers = self.headers.get_all('Authorization', [])
-            if len(headers) != 1 or not hmac.compare_digest(headers[0].encode(), credential):
-                self.reply(401, {'error': 'unauthorized'}); return
-            if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length') not in (None, '0'):
+            return len(headers) == 1 and hmac.compare_digest(headers[0].encode(), expected)
+        def do_GET(self):
+            if not self.framing() or self.headers.get('Content-Length') not in (None, '0'):
                 self.reply(400, {'error': 'body_not_allowed'}); return
+            if self.path == '/healthz': self.reply(200, {'status': 'ok'}); return
+            download = self.authorized(credential)
+            publishing = publisher and self.authorized(publisher.credential)
+            if not download and not publishing:
+                self.reply(401, {'error': 'unauthorized'}); return
             try:
                 if self.path == '/updates/manifest': self.reply(200, artifacts.manifest()); return
+                if not download: self.reply(403, {'error': 'download_key_required'}); return
                 name = self.path.removeprefix('/updates/')
                 if not self.path.startswith('/updates/') or not ARTIFACT.fullmatch(name):
                     self.reply(404, {'error': 'not_found'}); return
                 # Older immutable artifacts stay available across concurrent publication.
                 with artifacts.open(name)[0] as stream:
+                    self.close_connection = True
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/vnd.android.package-archive')
                     self.send_header('Content-Length', str(os.fstat(stream.fileno()).st_size))
                     self.send_header('Cache-Control', 'private, max-age=31536000, immutable')
+                    self.send_header('Connection', 'close')
                     self.send_header('X-Content-Type-Options', 'nosniff'); self.end_headers()
                     shutil.copyfileobj(stream, self.wfile, 65536)
             except FileNotFoundError: self.reply(404, {'error': 'not_found'})
             except (ValueError, KeyError, TypeError, OSError): self.reply(503, {'error': 'release_unavailable'})
-        def do_POST(self): self.reply(405, {'error': 'method_not_allowed'})
+        def do_POST(self):
+            if not self.framing(): self.reply(400, {'error': 'ambiguous_headers'}); return
+            if self.path != '/updates/publish' or publisher is None:
+                self.reply(405, {'error': 'method_not_allowed'}); return
+            if not self.authorized(publisher.credential):
+                self.reply(401, {'error': 'publisher_key_required'}); return
+            length = self.headers.get('Content-Length', '')
+            version = self.headers.get('X-OTA-Version-Code', '')
+            checksum = self.headers.get('X-OTA-SHA256', '')
+            if (not re.fullmatch('[1-9][0-9]{0,9}', length) or not 0 < int(length) <= MAX_APK or
+                    not re.fullmatch('[1-9][0-9]{0,9}', version) or not 0 < int(version) <= 2_100_000_000 or
+                    not re.fullmatch('[a-f0-9]{64}', checksum) or 'Expect' in self.headers):
+                self.reply(400, {'error': 'invalid_upload_metadata'}); return
+            if not publisher.lock.acquire(blocking=False):
+                self.reply(409, {'error': 'publication_busy'}); return
+            try:
+                code, body = self.receive_upload(int(length), int(version), checksum)
+            except (TimeoutError, ConnectionError):
+                code, body = 408, {'error': 'upload_timeout'}
+            except (ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                conflict = str(error) in ('release downgrade rejected', 'a different APK already uses this versionCode')
+                code, body = (409 if conflict else 422), {'error': 'release_conflict' if conflict else 'release_rejected'}
+            except OSError:
+                code, body = 503, {'error': 'publication_unavailable'}
+            finally: publisher.lock.release()
+            # Cleanup and release serialization before the receipt reaches a retrying client.
+            try: self.reply(code, body)
+            except OSError: pass
+        def receive_upload(self, length, version, checksum):
+            with tempfile.TemporaryDirectory(prefix='.upload-', dir=artifacts.root) as temporary:
+                candidate = Path(temporary) / 'candidate.apk'
+                actual = hashlib.sha256(); remaining = length; deadline = time.monotonic() + 900
+                with candidate.open('xb') as target:
+                    while remaining:
+                        block = self.rfile.read(min(65536, remaining))
+                        if not block or time.monotonic() > deadline:
+                            return 400, {'error': 'incomplete_upload'}
+                        target.write(block); actual.update(block); remaining -= len(block)
+                    target.flush(); os.fsync(target.fileno())
+                if not hmac.compare_digest(actual.hexdigest(), checksum):
+                    return 422, {'error': 'checksum_mismatch'}
+                manifest = stage(candidate, artifacts.root, publisher.build_tools, publisher.certificate, version)
+                return 200, {**manifest, 'sizeBytes': length, 'channel': 'dev'}
     return Handler
 
 
@@ -141,11 +217,17 @@ def serve(config):
     if address.version != 4: raise ValueError('This development listener currently supports IPv4')
     root = Path(config['output']); root.mkdir(mode=0o700, parents=True, exist_ok=True)
     token = private_file(config['token_file']).read_text().strip()
-    server = ThreadingHTTPServer((host, int(config.get('port', 8779))), handler(Artifacts(root), token))
+    publisher = None
+    if config.get('publisher_token_file'):
+        publisher = Publisher(private_file(config['publisher_token_file']).read_text().strip(),
+                              config['build_tools'], config['certificate_sha256'])
+    server = ThreadingHTTPServer((host, int(config.get('port', 8779))), handler(Artifacts(root), token, publisher))
     server.daemon_threads = True
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(config['tls_cert'], private_file(config['tls_key']))
-    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    # Defer each handshake to the request thread, whose socket timeout is already
+    # set by setup(); one incomplete TLS client must not block the accept loop.
+    server.socket = tls.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
     try: server.serve_forever()
     finally: server.server_close()
 
@@ -165,11 +247,32 @@ def approved_commit(config):
     return checkout, revision
 
 
+def forward_publication(config, state, state_path, published):
+    remote = config.get('remote_publication')
+    if not remote or not published: return
+    if (state.get('remote_published_sha256') == published['sha256'] and
+            state.get('remote_endpoint') == remote['endpoint']): return
+    if time.time() < state.get('remote_retry_after', 0): return
+    # Persist backoff before I/O. A lost response or worker restart is retried without
+    # rebuilding an already signed commit; the server's exact retry is idempotent.
+    state['remote_retry_after'] = time.time() + 60
+    atomic_json(state_path, state)
+    try:
+        from dev_ota_publish import publish
+        receipt = publish(config['output'], remote, config['certificate_sha256'])
+        state.update(remote_published_sha256=receipt['sha256'], remote_version=receipt['versionCode'],
+                     remote_endpoint=remote['endpoint'], remote_retry_after=0)
+        state.pop('remote_error', None)
+    except Exception as error:
+        state['remote_error'] = type(error).__name__
+        raise
+    finally: atomic_json(state_path, state)
+
+
 def build_once(config, builder=build_release):
     workspace = Path(config['workspace']).resolve(); workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (workspace / '.watch.lock').open('a+b') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        checkout, revision = approved_commit(config)
         state_path = workspace / 'build-state.json'
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         output = Path(config['output'])
@@ -178,6 +281,8 @@ def build_once(config, builder=build_release):
             # Recover a crash between atomic publication and recording its receipt.
             state.update(published_commit=state['attempt_commit'], published_version=published['versionCode'], retry_after=0)
             atomic_json(state_path, state)
+        forward_publication(config, state, state_path, published)
+        checkout, revision = approved_commit(config)
         # Failures retry the same assigned version, with durable backoff. Never rebuild a published commit.
         if state.get('published_commit') == revision: return None
         if state.get('attempt_commit') == revision and time.time() < state.get('retry_after', 0): return None
@@ -224,6 +329,7 @@ def build_once(config, builder=build_release):
                 os.environ.clear(); os.environ.update(previous)
             state.update(published_commit=revision, published_version=manifest['versionCode'], completed_at=time.time(), retry_after=0)
             atomic_json(state_path, state)
+            forward_publication(config, state, state_path, manifest)
             return manifest
         except Exception as error:
             state.update(error=type(error).__name__); atomic_json(state_path, state)
@@ -232,10 +338,14 @@ def build_once(config, builder=build_release):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['serve', 'build', 'watch'])
+    parser.add_argument('command', choices=['serve', 'build', 'watch', 'publish'])
     parser.add_argument('--config', required=True, type=Path)
     args = parser.parse_args(); config = load(args.config)
     if args.command == 'serve': serve(config); return
+    if args.command == 'publish':
+        from dev_ota_publish import publish
+        publish(config['output'], config['remote_publication'], config['certificate_sha256'])
+        print('Checked development release published.', flush=True); return
     if args.command == 'build': build_once(config); return
     while True:
         try: build_once(config)

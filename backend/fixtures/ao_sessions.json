@@ -1,0 +1,33 @@
+{
+  "sessions": [
+    {
+      "id": "demo-1", "projectId": "demo", "displayName": "Build synthetic example",
+      "kind": "worker", "harness": "codex", "statusReadiness": "ready",
+      "status": "working", "activity": {"state": "active", "lastActivityAt": "2026-10-22T10:00:00Z"},
+      "lastEventAt": "2026-10-22T10:00:00Z", "updatedAt": "2026-10-22T10:00:00Z",
+      "latestUserPrompt": "Implement the example", "latestAssistantUpdate": "Fixture tests passed."
+    },
+    {
+      "id": "demo-2", "projectId": "demo", "harness": "claude-code",
+      "statusReadiness": "ready", "status": "needs_input",
+      "activity": {"state": "waiting_input", "lastActivityAt": "2026-10-21T08:00:00Z"}
+    },
+    {
+      "id": "demo-3", "projectId": "demo", "statusReadiness": "ready",
+      "status": "needs_input", "activity": {"state": "blocked", "lastActivityAt": "2026-10-21T08:00:00Z"}
+    },
+    {
+      "id": "other-1", "projectId": "other", "kind": "orchestrator",
+      "statusReadiness": "ready", "status": "merged", "activity": {"state": "idle"}
+    },
+    {
+      "id": "other-2", "projectId": "other", "statusReadiness": "ready", "status": "working",
+      "activity": {"state": "active", "lastActivityAt": "2026-10-21T08:00:00Z"},
+      "updatedAt": "2026-10-22T10:05:00Z"
+    },
+    {
+      "id": "other-3", "projectId": "other", "isTerminated": true,
+      "statusReadiness": "ready", "status": "terminated", "activity": {"state": "exited"}
+    }
+  ]
+}

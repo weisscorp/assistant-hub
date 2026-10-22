@@ -129,3 +129,35 @@ and oversized responses, timeout/outage with and without cache, recovery and MCP
 request grants. They never send to a live task. Optional manual verification is
 only a read of `ao session ls --all --include-terminated --json` on an authorized
 mini; a sandbox/network denial is not a successful freshness check.
+
+### One-command verification handoff
+
+From the repository root, a worker with loopback access can run all backend tests
+and then one live read-only AO session-list check in a single command:
+
+```sh
+python3 tools/verify_ao_overview.py --network --full-suite
+```
+
+The live check runs even if a test fails, uses `MINI_TASKS_AO_URL` (default
+`http://127.0.0.1:3001`) and invokes only the existing adapter's session-list GET.
+It prints a JSON summary containing test exit code, source availability, check
+time, last successful check time and session count. It never prints live task
+identities, prompts or assistant updates. A failed test or unavailable source
+makes the command exit nonzero. Tests use temporary synthetic servers; no
+working Hub, Hermes, gateway or AO service is started/restarted.
+
+For the focused AO/gateway/Hermes bridge checks plus the same live read, omit
+`--full-suite`. Without `--network`, the command runs only fixture tests and does
+not contact AO or bind loopback sockets:
+
+```sh
+python3 tools/verify_ao_overview.py
+```
+
+Handoff status: the new combined `--network` command and live AO read are
+**unverified in this sandboxed worker**. A worker with loopback access must run
+the combined command before merge. Earlier isolated focused HTTP checks passed,
+but do not establish a successful live AO read. The previous full-suite attempt
+also found missing optional audio dependencies and an unchanged baseline Hub
+model-alias fixture failure; the combined command does not suppress those failures.

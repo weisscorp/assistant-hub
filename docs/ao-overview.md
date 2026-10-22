@@ -106,9 +106,10 @@ For a projectless AO session the project segment is empty (`ao:/SESSION`),
 route is invented. A missing/empty project ID cannot collide with a named project.
 
 A future RCP connector can reuse the source namespace and opaque project/entity
-segments, but product, feature, task and AO session are different entities.
+segments, but product, feature, integration, task and AO session are different entities.
 Reserve typed references for those entities, for example
-`rcp:product/PRODUCT_ID`, `rcp:feature/FEATURE_ID`, `rcp:task/TASK_ID`. Keep explicit
+`rcp:product/PRODUCT_ID`, `rcp:feature/FEATURE_ID`,
+`rcp:integration/INTEGRATION_ID`, `rcp:task/TASK_ID`. Keep explicit
 relations such as `implements` / `executed_by` between those references and
 `ao:PROJECT/SESSION`; do not assume matching names imply identity. This is only
 a reference convention, not an RCP API contract, lookup, storage or migration.

@@ -1,0 +1,9 @@
+# Python 3.12; isolated from the large-ASR teacher runtime.
+tone[finetune] @ git+https://github.com/voicekit-team/T-one.git@3c5b6c015038173840e62cea99e10cdb1c759116
+torch==2.7.1
+torchaudio==2.7.1
+transformers==4.57.6
+pyarrow==20.0.0
+scipy==1.16.2
+soundfile==0.13.1
+jiwer==4.0.0

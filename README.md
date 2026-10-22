@@ -27,7 +27,7 @@ flowchart LR
 
 - Authenticated HTTP API and browser UI; separate topics and focus per client.
 - Incoming webhooks, isolated incident assessment and durable phone/Coucou notification delivery.
-- Named revocable API keys and an explicit public HTTPS origin behind a trusted reverse proxy.
+- Owner login/password, a panel for named revocable application keys, and an explicit HTTPS origin behind a trusted reverse proxy.
 - Shared node capability discovery and durable action queue with executor acknowledgements.
 - Persistent Hub timers with direct model tools, topic notifications and completion in the Coucou mascot area.
 - Optional computer worker and explicit private LAN/VPN listener address.
@@ -39,6 +39,8 @@ flowchart LR
 - Memory tools that instruct agents to save durable user facts automatically.
   Actual saving still depends on a successful model tool call.
 - Ollama, native Codex, official Hermes through MCP, and Agent Orchestrator adapters.
+- OpenMausBot coding conversations with request-bound results and optional local
+  semantic routing: Auto sends coding work to MausBot and ordinary requests to Ollama.
 - Optional asynchronous OpenAI dot provider through MCP Events, with request-bound
   tools, durable callbacks and result submission. HTTPS OAuth or a private stdio
   tunnel relay; real dot subscription still requires setup and validation.
@@ -85,6 +87,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 ## Connect components
 
 - [Coucou, Codex, Hermes, Agent Orchestrator and cloud setup](docs/integrations.md)
+- [OpenMausBot coding chats, Auto routing and managed local runtimes](docs/mausbot.md)
 - [OpenAI dot, MCP Events, OAuth and private tunnel setup](docs/dot-integration.md)
 - [Shared memory, indexed search and history](docs/memory.md)
 - [Connected nodes, actions, timers and VPN transport](docs/capabilities.md)
@@ -92,6 +95,7 @@ quality and latency depend on the hardware and task. No weights are distributed 
 - [API and extending providers](docs/api.md)
 - [API keys and Internet access through HAProxy](docs/internet-access.md)
 - [Webhook incidents and notifications](docs/webhooks.md)
+- [Docker, TrueNAS and extensible scheduled collectors](docs/container-deployment.md)
 - [Codex completion reports and voice commands](docs/codex-voice.md)
 - [Security, private state and backups](SECURITY.md)
 - [Third-party credits and licenses](THIRD_PARTY.md)
@@ -120,3 +124,15 @@ project is an integration with [Coucou by Louis Raillé](https://github.com/Loui
 [Hermes by Nous Research](https://github.com/NousResearch/hermes-agent) and
 [Agent Orchestrator](https://github.com/OrchestratorInc/agent-orchestrator), not a
 relicensing or rebundling of those projects.
+
+### Coucou direct Hub window
+
+The local Coucou fork exposes **Хаб** for topic chat, explicit dictation and silent
+notifications. It reuses the configured loopback `/coucou/<capability>` connection,
+with optional `/v1`, and the narrow `GET/POST /api/desktop-hub` facade. GET returns
+topic focus, latest history, provider readiness, current runs and the latest 60
+notifications. POST supports only revision-checked `focus` and idempotent `send`;
+it does not grant access to arbitrary owner APIs. Notifications are created through
+the Hub's existing `notify` tool/API; local read badges never claim delivery or
+human acknowledgement. Tests use synthetic fixtures, no microphone or devices:
+`PYTHONPATH=backend python3 -m unittest backend.test_hub_coucou -q`.

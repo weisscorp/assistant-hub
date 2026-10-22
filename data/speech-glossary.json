@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "entries": [
+    {"canonical":"Terraform","aliases":["терраформ","терраформа","терраформом","тэроформ","тэроформа","тероформ","тероформа"],"context":"инфра|репозитор|проект|модул|провайдер|ресурс|деплой|разворач|облак|apply|plan|iac","source":"curated"},
+    {"canonical":"Kotlin","aliases":["котлин","котли","котлина"],"context":"android|андроид|gradle|java|jdk|джав|ждик|compose|программ|разработ|код|язык","source":"curated"},
+    {"canonical":"Kubernetes","aliases":["кубернетес","кубернетис","кубернетс","кубернетеса"],"source":"curated"},
+    {"canonical":"Docker","aliases":["докер","докера","докером"],"source":"curated"},
+    {"canonical":"Ansible","aliases":["ансибл","ансиблэ","энсибл"],"source":"curated"},
+    {"canonical":"PostgreSQL","aliases":["постгрес","постгреса","постгрескьюэл"],"source":"curated"},
+    {"canonical":"GitHub","aliases":["гитхаб","гитхаба"],"source":"curated"},
+    {"canonical":"GitLab","aliases":["гитлаб","гитлаба"],"source":"curated"},
+    {"canonical":"Gradle","aliases":["градл","грейдл"],"source":"curated"},
+    {"canonical":"Python","aliases":["пайтон","питон"],"context":"код|разработ|программ|скрипт|язык|python","source":"curated"},
+    {"canonical":"Android","aliases":["андроид","андроида"],"source":"curated"},
+    {"canonical":"DevOps","aliases":["девопс","девопса"],"source":"curated"},
+    {"canonical":"Java","aliases":["джава","джаве"],"source":"curated"},
+    {"canonical":"Helm","aliases":["хелм","хельм"],"source":"curated"},
+    {"canonical":"Prometheus","aliases":["прометеус","прометеуса"],"source":"curated"},
+    {"canonical":"Grafana","aliases":["графана","графану"],"source":"curated"},
+    {"canonical":"Jenkins","aliases":["дженкинс","дженкинса"],"source":"curated"},
+    {"canonical":"Redis","aliases":["редис"],"context":"баз|кеш|кэш|сервер|кластер|redis","source":"curated"}
+  ],
+  "candidates": []
+}

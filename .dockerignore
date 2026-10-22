@@ -1,6 +1,22 @@
-.git
-**/__pycache__
+# Allowlist: no recordings, databases, local config, tokens or repository metadata.
+*
+!backend/
+!backend/*.py
+!backend/hub_ui/
+!backend/hub_ui/**
+!tools/
+!tools/*.py
+!deploy/
+!deploy/hub/
+!deploy/hub/Dockerfile
+!LICENSE
+!THIRD_PARTY.md
+backend/test_*.py
+tools/test_*.py
+**/__pycache__/
 **/*.pyc
+# Preserve exclusions for the older development OTA image as well.
+.git
 .venv
 data
 runtime

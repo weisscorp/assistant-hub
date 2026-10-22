@@ -11,6 +11,21 @@ class MobileLink:
     def __init__(self, app):
         self.app=app
         self.link=HomeLinkStore(app.store.directory/'phone-link')
+        from audio_notes import AudioNotes
+        self.notes=AudioNotes(app.store.directory/'audio-notes')
+        from speech_dataset import SpeechDataset
+        self.speech=SpeechDataset(app.store.directory/'asr-dataset')
+
+    def audio_note(self,device,note):
+        value=self.notes.put(device,note)
+        key='audio-note:'+value['id']
+        body=encoded({'id':value['id'],'title':value['title'],'transcript':value['text'][:6000],
+                      'createdAt':value['createdAt'],'detailsTool':'audio_notes'} )
+        previous=next((m for m in self.app.store.memories() if m['key']==key),None)
+        if not previous or previous['body']!=body:
+            self.app.store.put_memory(key,body,'audio-notes',previous['revision'] if previous else 0)
+            self.app.store.event('memory.changed',None,None,key=key,scope='global')
+        return value
 
     def knowledge(self,device,source):
         if not source:
@@ -38,8 +53,16 @@ class MobileLink:
     def turn(self,body):
         validate(body)
         client='android:'+body.get('phoneDevice',body['session'])
+        if body['text'].casefold().strip(' .!?') in {'сводка событий','что требует внимания','мои события'}:
+            cases = [c for c in self.app.awareness.snapshot()['cases'] if c['effective_status'] in {'open','in_progress'}]
+            reply = 'Открытых ситуаций нет.' if not cases else '\n'.join(
+                str(i+1)+'. '+c['project']+': '+c['title']+'. '+c['reason'] for i,c in enumerate(cases[:5]))
+            return response({'reply':reply[:1500],'action':None},body)
+        if self.app.context_router.enabled:
+            return response({'reply':self.app.context_router.turn(body,client),'action':None},body)
         context=self.app.client_focus(client)['context_id']
-        row=self.app.coordinator.submit(context,client,self.app.config.get('mobile_provider','ollama'),body['text'],body['id'])
+        default_provider='auto' if 'auto' in self.app.providers else 'ollama'
+        row=self.app.coordinator.submit(context,client,self.app.config.get('mobile_provider',default_provider),body['text'],body['id'])
         deadline=time.monotonic()+25
         while row['status'] not in TERMINAL and time.monotonic()<deadline:
             time.sleep(.1);row=self.app.store.task(row['id'])

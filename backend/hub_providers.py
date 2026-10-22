@@ -76,7 +76,7 @@ def messages(row, coordinator):
     packet = coordinator.context_packet(row)
     # Current queued input appears once, after history. Pending other clients' inputs
     # are excluded until their turn actually starts.
-    pending = {t['id'] for t in coordinator.store.tasks(row['context_id']) if t['status'] not in {'completed','failed','cancelled','unknown'}}
+    pending = {t['id'] for t in coordinator.store.tasks(row['context_id']) if t['status'] not in {'completed','failed','cancelled','unknown','needs_user'}}
     packet['entries'] = [e for e in packet['entries'] if e['id'] not in pending]
     entries = packet.pop('entries')
     history, results = [], []

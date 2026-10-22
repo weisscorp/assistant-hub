@@ -1,7 +1,7 @@
 """Owner API keys and bounded, revocable browser credentials.
 
-Random API secrets are returned once to the local CLI. Only SHA-256 digests
-are persisted; no endpoint creates or returns an API secret.
+Random API secrets are shown once to an authenticated owner. Only SHA-256
+digests are persisted. Browser passwords use salted scrypt hashes.
 """
 from collections import OrderedDict
 import hashlib
@@ -9,6 +9,7 @@ import secrets
 import threading
 import time
 import uuid
+import re
 from agent_hub import text, uid
 
 
@@ -39,8 +40,9 @@ class AccessKeys:
                 db.execute("ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'owner'")
 
     def issue(self, name, scope='owner'):
-        if scope not in {'owner','webhook','mcp'}:raise ValueError('Invalid API key scope')
+        if scope not in {'owner','app','webhook','mcp','deploy'}:raise ValueError('Invalid API key scope')
         name = text(name, 128).strip()
+        if not name: raise ValueError('Укажите название приложения')
         secret = 'hub_' + secrets.token_urlsafe(48)
         row = {'id':str(uuid.uuid4()), 'name':name, 'created_at':time.time(), 'revoked_at':None,'scope':scope}
         with self.store.connect() as db:
@@ -75,12 +77,16 @@ class AccessKeys:
             return row['id'] if row else None
 
     def active(self, principal):
+        if principal and principal.startswith('account:'):
+            return WebAccount(self.store).active(principal)
         if principal == OWNER:
             return bool(self.owner_digest)
         with self.store.connect() as db:
             return bool(db.execute('SELECT 1 FROM api_keys WHERE id=? AND revoked_at IS NULL', (principal,)).fetchone())
 
     def scope(self, principal):
+        if principal and principal.startswith('account:'):
+            return 'owner' if self.active(principal) else None
         if principal == OWNER:return 'owner'
         with self.store.connect() as db:
             row=db.execute('SELECT scope FROM api_keys WHERE id=? AND revoked_at IS NULL',(principal,)).fetchone()
@@ -117,6 +123,10 @@ class BrowserCredentials:
     def ticket(self, principal, origin):
         return self._create(self.tickets, principal, origin, 60)
 
+    def revoke(self, value):
+        with self.lock:
+            self.sessions.pop(value, None)
+
     def resolve(self, value, origin, ticket=False):
         with self.lock:
             cache = self.tickets if ticket else self.sessions
@@ -145,6 +155,8 @@ class AuthFailures:
         self.lock = threading.Lock()
         self.peers = OrderedDict()
         self.window, self.total = -1, 0
+        self.password_peers = OrderedDict()
+        self.password_window, self.password_total = -1, 0
 
     def reject(self, peer):
         window = int(time.monotonic() // 60)
@@ -161,3 +173,93 @@ class AuthFailures:
         if limited:
             raise RateLimited('Слишком много запросов без верного ключа. Повторите через минуту.')
         raise PermissionError('Нужен ключ доступа к Hub')
+
+    def check_password_attempt(self, peer):
+        with self.lock:
+            if self.password_window == int(time.monotonic() // 60) and (self.password_peers.get(peer, 0) >= 20 or self.password_total >= 200):
+                raise RateLimited('Слишком много попыток входа. Повторите через минуту.')
+
+    def reject_password(self, peer):
+        # Expired cookies and unauthenticated background reads must not consume
+        # the password budget or prevent a correct login after a restart.
+        window = int(time.monotonic() // 60)
+        with self.lock:
+            if self.password_window != window:
+                self.password_window, self.password_total = window, 0
+                self.password_peers.clear()
+            self.password_total += 1
+            count = self.password_peers.pop(peer, 0) + 1
+            self.password_peers[peer] = count
+            if len(self.password_peers) > 1024: self.password_peers.popitem(last=False)
+            if count > 20 or self.password_total > 200:
+                raise RateLimited('Слишком много попыток входа. Повторите через минуту.')
+        raise PermissionError('Неверный логин или пароль')
+
+
+class WebAccount:
+    """Single owner account, independently revocable browser sessions.
+
+    API keys never become account sessions. Updating the password increments
+    the session generation, invalidating all older browser credentials.
+    """
+    kdf_slots = threading.BoundedSemaphore(4)
+
+    def __init__(self, store):
+        self.store = store
+        with store.connect() as db:
+            db.execute('''CREATE TABLE IF NOT EXISTS web_account(
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL,
+                username TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
+                generation INTEGER NOT NULL, updated_at REAL NOT NULL)''')
+
+    @staticmethod
+    def username(value):
+        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.@-]{3,64}', value):
+            raise ValueError('Логин: от 3 до 64 латинских букв, цифр или знаков . _ @ -')
+        return value.lower()
+
+    @classmethod
+    def hash(cls, password, salt):
+        with cls.kdf_slots:
+            return hashlib.scrypt(password.encode('utf-8'), salt=bytes.fromhex(salt),
+                n=32768, r=8, p=1, dklen=32, maxmem=64*1024*1024).hex()
+
+    def status(self):
+        with self.store.connect() as db:
+            row = db.execute('SELECT username FROM web_account WHERE singleton=1').fetchone()
+        return {'configured': bool(row), 'username': row['username'] if row else None}
+
+    def active(self, principal):
+        with self.store.connect() as db:
+            row = db.execute('SELECT id,generation FROM web_account WHERE singleton=1').fetchone()
+        return bool(row and principal == f"account:{row['id']}:{row['generation']}")
+
+    def verify(self, username, password):
+        if not isinstance(password, str) or not 1 <= len(password.encode('utf-8')) <= 1024:
+            return None
+        with self.store.connect() as db:
+            row = db.execute('SELECT * FROM web_account WHERE singleton=1').fetchone()
+        salt = row['salt'] if row else '00'*16
+        hashed = self.hash(password, salt)  # Equal KDF cost for unknown usernames.
+        if row and isinstance(username, str) and username.lower() == row['username'] and secrets.compare_digest(hashed, row['password_hash']):
+            return f"account:{row['id']}:{row['generation']}"
+        return None
+
+    def save(self, username, password, principal=None, current_password=None):
+        username = self.username(username)
+        if not isinstance(password, str) or not 12 <= len(password) or len(password.encode('utf-8')) > 1024:
+            raise ValueError('Пароль: не менее 12 символов, не более 1024 байт')
+        before = self.status()
+        if before['configured'] and (not self.active(principal) or self.verify(before['username'], current_password) != principal):
+            raise Forbidden('Введите текущий пароль')
+        salt = secrets.token_hex(16); hashed = self.hash(password, salt)
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT id,generation FROM web_account WHERE singleton=1').fetchone()
+            if old and principal != f"account:{old['id']}:{old['generation']}":
+                raise Forbidden('Учётная запись уже настроена. Войдите заново.')
+            identifier = old['id'] if old else str(uuid.uuid4())
+            generation = old['generation']+1 if old else 1
+            db.execute('INSERT OR REPLACE INTO web_account VALUES(1,?,?,?,?,?,?)',
+                (identifier, username, salt, hashed, generation, time.time()))
+        return f'account:{identifier}:{generation}'

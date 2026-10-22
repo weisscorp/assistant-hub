@@ -24,6 +24,42 @@ def hub_url(config):
     return 'http://' + authority(config.get('host', '127.0.0.1'), config.get('port', 8778))
 
 
+def http_origins(config):
+    """Explicit LAN/container aliases; never infer trust from a request's Host."""
+    values = config.get('http_origins', [])
+    if not isinstance(values, list) or len(values) > 16:
+        raise ValueError('http_origins must contain at most 16 explicit HTTP origins')
+    result = {}
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError('Invalid HTTP origin')
+        url = urllib.parse.urlsplit(value)
+        if (url.scheme != 'http' or not url.hostname or url.username is not None
+                or url.password is not None or url.path not in ('', '/') or url.query or url.fragment):
+            raise ValueError('Expected an HTTP origin without credentials, path or query')
+        host = url.hostname
+        try:
+            address = bind_ip(host)
+            host = '[' + str(address) + ']' if address.version == 6 else str(address)
+        except ValueError:
+            # A literal public/wildcard IP must not sneak through as a DNS name.
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                if len(host) > 253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in host.split('.')):
+                    raise ValueError('Invalid HTTP hostname') from None
+            else:
+                raise ValueError('HTTP IP aliases must be loopback, LAN or VPN addresses') from None
+        port = url.port
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError('Invalid HTTP port')
+        canonical = host + (':' + str(port) if port is not None else '')
+        if canonical != url.netloc:
+            raise ValueError('HTTP origin must use a canonical lowercase authority')
+        result[canonical] = 'http://' + canonical
+    return result
+
+
 class ProxyOrigin:
     """A single explicit HTTPS origin, accepted only through named proxy IPs."""
     def __init__(self, config):

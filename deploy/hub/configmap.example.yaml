@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: assistant-hub-collectors
+data:
+  collectors.toml: |
+    [hub]
+    url = "http://assistant-hub:8778"
+    token_env = "COLLECTOR_HUB_TOKEN"
+    [runtime]
+    state = "/data/collectors"
+    [[sources]]
+    id = "workloads"
+    plugin = "hub_collector_plugins:HttpJson"
+    interval_seconds = 30
+    timeout_seconds = 15
+    [sources.options]
+    url = "https://service.example/api/jobs"
+    token_env = "WORKLOAD_API_TOKEN"
+    pointer = "/data/jobs"
+    items = true
+    id_pointer = "/id"
+# Mount collectors.toml at /config/collectors.toml, a dedicated RWO PVC at /data,
+# and tokens via Secret env/volume. Run one collector replica with Recreate.
+# Add http://assistant-hub:8778 to the Hub's HUB_HTTP_ORIGINS.

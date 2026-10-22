@@ -43,8 +43,11 @@ def assessment(value):
 
 
 class ModelEvaluator:
-    def __init__(self, provider):
+    def __init__(self, provider, timeout=90):
         self.provider = dict(provider)
+        if type(timeout) is not int or not 15 <= timeout <= 600:
+            raise ValueError('Incident timeout must be 15..600 seconds')
+        self.timeout = timeout
         if provider.get('type') != 'ollama':
             raise ValueError('Incident evaluator requires a configured Ollama HTTP provider')
 
@@ -57,7 +60,7 @@ class ModelEvaluator:
                                 'payload_preview':row['payload'].encode()[:12000].decode('utf-8','ignore'),
                                 'truncated':len(row['payload'].encode())>12000})}],
                 'options':{'temperature':0.1,'num_ctx':16384,'num_predict':768}}
-        reply = request_json(self.provider['url'].rstrip('/')+'/api/chat',body,timeout=90)
+        reply = request_json(self.provider['url'].rstrip('/')+'/api/chat',body,timeout=self.timeout)
         message = reply.get('message',{})
         if reply.get('done') is not True or message.get('tool_calls') or reply.get('done_reason')=='length':
             raise ValueError('Assessment did not complete without tools')
@@ -73,7 +76,7 @@ class Incidents:
         provider = config.get('incidents',{}).get('provider','ollama')
         self.evaluator = evaluator
         if evaluator is None and config.get('providers',{}).get(provider,{}).get('type')=='ollama':
-            self.evaluator = ModelEvaluator(config['providers'][provider])
+            self.evaluator = ModelEvaluator(config['providers'][provider], config.get('incidents',{}).get('timeout_seconds',90))
         self.stop = threading.Event()
         self.thread = None
         self.delivery_thread = None

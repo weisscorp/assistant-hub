@@ -15,10 +15,12 @@ import uuid
 from agent_hub import Conflict, encoded, uid, text
 from hub_runtime import Coordinator, RuntimeStore, TERMINAL
 from hub_providers import OllamaProvider, NativeCodexProvider, CommandProvider, OrchestratorProvider, CloudProvider
-from hub_network import bind_ip, authority, ProxyOrigin
-from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited, Forbidden
+from hub_network import bind_ip, authority, ProxyOrigin, http_origins
+from hub_auth import AccessKeys, BrowserCredentials, AuthFailures, RateLimited, Forbidden, WebAccount
 from hub_mcp_events import McpEvents, DotProvider
 from hub_mcp_oauth import McpOAuth, OAuthError
+from hub_mausbot import MausBotProvider
+from hub_routing import RoutingProvider
 
 
 def private_json(path):
@@ -33,6 +35,7 @@ class HubApplication:
     def __init__(self, config):
         self.config = config
         self.proxy = ProxyOrigin(config)
+        http_origins(config)
         self.store = RuntimeStore(config['state'])
         preserve = [name for name,value in config['providers'].items() if value.get('type')=='mcp_events'] if config.get('mcp_events') is not None else []
         self.store.recover(preserve)
@@ -41,6 +44,7 @@ class HubApplication:
             raise ValueError('Token must be an owned private regular file')
         self.token = token_path.read_text().strip()
         self.auth = AccessKeys(self.store, self.token)
+        self.account = WebAccount(self.store)
         self.browser = BrowserCredentials(self.auth)
         self.auth_failures = AuthFailures()
         self.device = self.store.setting('desktop-device')
@@ -49,17 +53,33 @@ class HubApplication:
         if not self.store.contexts(): self.store.create_context('Разговор')
         self.providers = {}
         for name, value in config['providers'].items():
+            if value['type'] == 'routing': continue
             if value['type'] == 'ollama': self.providers[name] = OllamaProvider(value['url'], value['model'])
             elif value['type'] == 'codex': self.providers[name] = NativeCodexProvider(value['binary'], value['workspace'])
             elif value['type'] == 'command': self.providers[name] = CommandProvider(value['argv'], value['label'],value.get('log_file'))
             elif value['type'] == 'orchestrator': self.providers[name] = OrchestratorProvider(value)
             elif value['type'] == 'cloud': self.providers[name] = CloudProvider(value)
             elif value['type'] == 'mcp_events': self.providers[name] = DotProvider(value.get('agent_id','personal-dot'))
+            elif value['type'] == 'mausbot': self.providers[name] = MausBotProvider(value, provider_id=name)
             else: raise ValueError('Unknown provider type')
+        from hub_connections import HermesConnections
+        self.hermes_connections = HermesConnections(self.store.directory, self.providers.get('hermes'))
+        self.providers['hermes'] = self.hermes_connections
+        for name, value in config['providers'].items():
+            if value['type'] == 'routing': self.providers[name] = RoutingProvider(value, self.providers)
         self.coordinator = Coordinator(self.store, self.providers, self.coucou)
         self.fabric = self.coordinator.fabric
         from hub_mobile import MobileLink
         self.mobile=MobileLink(self); self.store.mobile_link=self.mobile
+        from hub_awareness import Awareness
+        self.awareness = Awareness(self.store, self.mobile.link)
+        from hub_context_router import ContextRouter
+        self.context_router = ContextRouter(self.store, config.get('context_router', {}))
+        from desktop_speech_capture import DesktopSpeechCapture
+        self.speech_capture=DesktopSpeechCapture(self)
+        self.speech_capture.finalize_history()
+        from speech_pipeline import SpeechPipeline
+        self.speech_pipeline=SpeechPipeline(self)
         from hub_incidents import Incidents
         self.incidents = Incidents(self.store,self.mobile.link,config)
         from hub_codex import CodexLink
@@ -68,7 +88,18 @@ class HubApplication:
         self.mcp = McpEvents(self, config.get('mcp_events'))
         self.oauth = McpOAuth(self)
         self.lock = threading.RLock()
+        from hub_updates import Updates
+        self.updates = Updates(os.environ.get('HUB_UPDATE_DIR'))
+        self.coordinator.admission_guard = self.updates.barrier
         self.cached_status, self.status_at = {}, 0
+        # Resume request-bound observation after a restart, never a send.
+        for row in self.store.reconcilable_tasks():
+            provider = self.providers.get(row['provider'])
+            if callable(getattr(provider, 'watch', None)):
+                stop = threading.Event()
+                self.coordinator.active[row['id']] = stop
+                if not provider.watch(row, self.coordinator, stop):
+                    self.coordinator.active.pop(row['id'], None)
 
     def coucou(self, row, kind, data):
         from coucou_events import wire_event, write_event, EVENTS
@@ -110,6 +141,8 @@ class HubHandler(BaseHTTPRequestHandler):
         allowed = {authority(host, self.server.server_port)}
         if bind_ip(host).is_loopback:
             allowed.add(f'localhost:{self.server.server_port}')
+        if hasattr(self.server, 'app'):
+            allowed.update(http_origins(self.app.config))
         self.public_request = False
         self.auth_peer = self.client_address[0] if hasattr(self, 'client_address') else host
         proxy = self.app.proxy if hasattr(self.server, 'app') else ProxyOrigin({})
@@ -141,8 +174,10 @@ class HubHandler(BaseHTTPRequestHandler):
             self.request_origin = 'http://' + supplied_host
         origin = self.headers.get('Origin')
         if origin and origin != self.request_origin: raise PermissionError('Invalid origin')
-        oauth_navigation = getattr(self,'command',None)=='GET' and urllib.parse.urlsplit(getattr(self,'path','')).path=='/oauth/authorize'
-        if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not oauth_navigation: raise PermissionError('Invalid origin')
+        public_navigation = (getattr(self,'command',None)=='GET' and
+            urllib.parse.urlsplit(getattr(self,'path','')).path in {'/','/oauth/authorize'} and
+            self.headers.get('Sec-Fetch-Mode','navigate') == 'navigate')
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not public_navigation: raise PermissionError('Invalid origin')
 
     def authorized(self):
         header = self.headers.get('Authorization')
@@ -218,25 +253,41 @@ class HubHandler(BaseHTTPRequestHandler):
                 form=self.form();cookie=SimpleCookie(self.headers.get('Cookie',''));nonce=cookie.get('hub_oauth_consent')
                 location=self.app.oauth.approve(form.get('nonce'),nonce.value if nonce else None,form.get('token'))
                 return self.reply(b'',303,{'Location':location,'Set-Cookie':'hub_oauth_consent=; HttpOnly; SameSite=Lax; Path=/oauth/authorize; Max-Age=0'})
+            if path in {'/awareness','/awareness.js','/awareness.css'} and method == 'GET':
+                filename = {'/awareness':'awareness.html','/awareness.js':'awareness.js','/awareness.css':'awareness.css'}[path]
+                mime = {'/awareness':'text/html','/awareness.js':'text/javascript','/awareness.css':'text/css'}[path]
+                return self.reply((Path(__file__).parent/'hub_ui'/filename).read_bytes(), mime=mime+'; charset=utf-8')
             if path in {'/','/app.js','/app.css'} and method == 'GET':
                 filename = {'/':'index.html','/app.js':'app.js','/app.css':'app.css'}[path]
                 mime = {'/':'text/html','/app.js':'text/javascript','/app.css':'text/css'}[path]
                 return self.reply((Path(__file__).parent/'hub_ui'/filename).read_bytes(), mime=mime+'; charset=utf-8')
             if path == '/api/login' and method == 'POST':
                 body = self.body()
-                principal = self.app.auth.resolve(body.get('token'))
+                if 'password' in body:
+                    if self.headers.get('Origin') != self.request_origin:
+                        raise Forbidden('Войдите с этой страницы Hub')
+                    self.app.auth_failures.check_password_attempt(self.auth_peer)
+                    principal = self.app.account.verify(body.get('username'), body.get('password'))
+                    if not principal:
+                        try: self.app.auth_failures.reject_password(self.auth_peer)
+                        except RateLimited: raise
+                        except PermissionError: raise PermissionError('Неверный логин или пароль')
+                else:
+                    principal = self.app.auth.resolve(body.get('token'))
                 if not principal: self.app.auth_failures.reject(self.auth_peer)
                 if self.app.auth.scope(principal)!='owner':raise Forbidden('Для входа нужен ключ владельца Hub')
                 return self.reply({'ok':True},headers={'Set-Cookie':self.session_cookie(principal)})
+            if path == '/api/auth/status' and method == 'GET':
+                return self.reply({'configured': self.app.account.status()['configured']})
             if path == '/ticket' and method == 'GET':
                 principal = self.app.browser.resolve(get('id',''), self.request_origin, ticket=True)
                 if not principal: self.app.auth_failures.reject(self.auth_peer)
                 return self.reply(b'',303,{'Location':'/', 'Set-Cookie':self.session_cookie(principal)})
             coucou_access=False
             prefix='/coucou/'+self.app.config.get('coucou_capability','unconfigured')
-            if path in {prefix+'/v1/models',prefix+'/v1/chat/completions'}:
+            if path in {prefix+'/v1/models',prefix+'/v1/chat/completions',prefix+'/api/speech-capture',prefix+'/api/desktop-hub'}:
                 # Original Coucou's local provider sends a fixed "Bearer ollama".
-                # A separate scoped URL capability exposes only the model facade.
+                # The loopback capability exposes the model facade and explicit capture controls.
                 coucou_access=(not self.public_request and bind_ip(self.server.server_address[0]).is_loopback
                                and self.auth_peer in ('127.0.0.1','::1')
                                and bool(self.app.config.get('coucou_capability'))
@@ -244,10 +295,101 @@ class HubHandler(BaseHTTPRequestHandler):
                 path=path[len(prefix):]
             principal = self.authorized()
             if not principal and not coucou_access: self.app.auth_failures.reject(self.auth_peer)
-            if principal and self.app.auth.scope(principal)=='webhook' and (method,path)!=('POST','/webhooks/events'):
+            if self.app.updates.barrier() and method == 'POST' and path != '/api/logout':
+                raise Conflict('Hub переключает версию. Повторите запрос после перезапуска.')
+            if path.startswith('/api/releases'):
+                account_owner = principal and principal.startswith('account:') and self.app.account.active(principal)
+                publisher = principal and self.app.auth.scope(principal) == 'deploy'
+                if not account_owner and not (publisher and path == '/api/releases/stage'):
+                    raise Forbidden('Обновлениями управляет владелец; ключ публикации может только загрузить пакет')
+                if path == '/api/releases' and method == 'GET': return self.reply(self.app.updates.status())
+                if path == '/api/releases/stage' and method == 'POST':
+                    from hub_updates import MAX_ARCHIVE
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 1 <= size <= MAX_ARCHIVE or self.headers.get('Content-Type') != 'application/gzip':
+                        raise ValueError('Загрузите пакет application/gzip размером до 4 МиБ')
+                    raw = self.rfile.read(size)
+                    if len(raw) != size: raise ValueError('Пакет получен не полностью')
+                    return self.reply(self.app.updates.stage(raw,self.headers.get('X-Release-SHA256')),201)
+                if path == '/api/releases/activate' and method == 'POST':
+                    body = self.body()
+                    with self.app.coordinator.lock:
+                        if self.app.coordinator.active: raise Conflict('Дождитесь завершения текущих задач перед обновлением')
+                        result = self.app.updates.request(body['version'])
+                    return self.reply(result,202)
+                return self.reply({'error':'Unknown release endpoint'},404)
+            if principal and self.app.auth.scope(principal) == 'deploy':
+                raise Forbidden('Ключ публикации может только загружать релизы Hub')
+            if path == '/api/logout' and method == 'POST':
+                cookie = SimpleCookie(self.headers.get('Cookie','')); value = cookie.get('hub_session')
+                if value: self.app.browser.revoke(value.value)
+                return self.reply({'ok':True},headers={'Set-Cookie':'hub_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+('; Secure' if self.public_request else '')})
+            if path.startswith('/api/connections'):
+                if not (principal and principal.startswith('account:') and self.app.account.active(principal)):
+                    raise Forbidden('Для настройки подключений войдите по логину и паролю владельца')
+                connections = self.app.hermes_connections
+                if path == '/api/connections' and method == 'GET': return self.reply(connections.snapshot())
+                if method == 'POST':
+                    body = self.body()
+                    if path == '/api/connections/test': return self.reply(connections.save(body, save=False))
+                    if path == '/api/connections/save': return self.reply(connections.save(body))
+                    if path == '/api/connections/activate':
+                        result = connections.activate(body)
+                        self.app.status_at = 0
+                        return self.reply(result)
+                return self.reply({'error':'Unknown connection endpoint'},404)
+            if path in {'/api/account','/api/access-keys','/api/access-keys/revoke'}:
+                account_owner = principal and principal.startswith('account:') and self.app.account.active(principal)
+                bootstrap = (path == '/api/account' and not self.app.account.status()['configured'] and
+                             principal and self.app.auth.scope(principal) == 'owner')
+                if not account_owner and not bootstrap:
+                    raise Forbidden('Для управления доступом войдите по логину и паролю')
+                if path == '/api/account':
+                    if method == 'GET': return self.reply(self.app.account.status())
+                    self.app.auth_failures.check_password_attempt(self.auth_peer)
+                    body = self.body()
+                    try:
+                        account = self.app.account.save(body.get('username'), body.get('password'), principal, body.get('current_password'))
+                    except Forbidden:
+                        try: self.app.auth_failures.reject_password(self.auth_peer)
+                        except RateLimited: raise
+                        except PermissionError: raise Forbidden('Неверный текущий пароль или устаревшая сессия')
+                    return self.reply({'ok':True},headers={'Set-Cookie':self.session_cookie(account)})
+                if path == '/api/access-keys' and method == 'GET':
+                    return self.reply(self.app.auth.list())
+                if method == 'POST':
+                    body = self.body()
+                    if path.endswith('/revoke'):
+                        self.app.auth.revoke(body['id']); return self.reply({'ok':True})
+                    scope = body.get('scope','app')
+                    if scope not in {'app','webhook','mcp','deploy'}: raise ValueError('Недопустимые права приложения')
+                    metadata, secret = self.app.auth.issue(body.get('name'), scope)
+                    return self.reply({'key':metadata,'token':secret},201)
+            if principal and self.app.auth.scope(principal)=='app' and path in {'/api/tickets','/ticket'}:
+                raise Forbidden('Ключ приложения не предназначен для входа в панель')
+            if principal and self.app.auth.scope(principal)=='webhook' and (method,path) not in {('POST','/webhooks/events'),('POST','/api/awareness/events')}:
                 raise Forbidden('Этот ключ может только отправлять вебхуки')
             if principal and self.app.auth.scope(principal)=='mcp' and path!='/mcp':
                 raise Forbidden('Этот ключ предназначен только для MCP-инструментов dot')
+            if path.startswith('/api/awareness'):
+                if not principal: raise Forbidden('Нужен ключ доступа к Hub')
+                if method == 'POST' and path == '/api/awareness/events':
+                    return self.reply(self.app.awareness.accept(self.body(), principal), 202)
+                if self.app.auth.scope(principal) != 'owner': raise Forbidden('Нужен ключ владельца Hub')
+                if method == 'GET' and path == '/api/awareness':
+                    return self.reply({**self.app.awareness.snapshot(), 'routes':self.app.context_router.catalog()})
+                if method == 'POST':
+                    body = self.body()
+                    if path == '/api/awareness/decision':
+                        return self.reply(self.app.awareness.decide(body['id'], body['revision'], body['action'], body.get('seconds',3600)))
+                    if path == '/api/awareness/publish':
+                        return self.reply(self.app.awareness.publish(body['id'], body['revision'], body['device']))
+                    if path == '/api/awareness/demo':
+                        if not self.app.config.get('awareness_demo'): raise Forbidden('Демо выключено в конфигурации')
+                        from hub_awareness import demo_events
+                        for event in demo_events(): self.app.awareness.accept(event, 'synthetic-demo')
+                        return self.reply(self.app.awareness.snapshot())
+                return self.reply({'error':'Unknown awareness endpoint'},404)
             if path=='/mcp':
                 self.app.mcp.require(principal)
                 if method!='POST': return self.reply({'error':'Use MCP POST transport'},405,{'Allow':'POST'})
@@ -262,11 +404,19 @@ class HubHandler(BaseHTTPRequestHandler):
                     urllib.parse.unquote(self.headers.get('X-Event-Source','webhook'),errors='strict'),urllib.parse.unquote(self.headers.get('X-Event-Title','Новое событие'),errors='strict'),
                     self.headers.get('X-Event-Targets','auto'),self.headers.get('Idempotency-Key'))
                 return self.reply({'id':value['id'],'status':value['status'],'targets':value['targets']},202)
+            if path == '/api/desktop-hub':
+                from hub_coucou import desktop_hub
+                return self.reply(desktop_hub(self.app, method, self.body() if method == 'POST' else None))
             s = self.app.store
             if path.startswith('/link/'):
                 return self.mobile_request(path,query,method)
             if method == 'GET':
-                if path == '/health': return self.reply({'status':'ok','version':'0.1.0'})
+                if path == '/api/speech-pipeline': return self.reply(self.app.speech_pipeline.status())
+                if path == '/api/speech-capture': return self.reply(self.app.speech_capture.status())
+                if path == '/api/speech-samples': return self.reply(self.app.mobile.speech.list(int(get('offset','0'))))
+                if path == '/api/audio-notes': return self.reply(self.app.mobile.notes.read(get('query',''),get('id',''),int(get('offset','0'))))
+                if path.startswith('/api/audio-notes/audio/'): return self.reply(self.app.mobile.notes.blob(path.rsplit('/',1)[1]),mime='audio/wav')
+                if path == '/health': return self.reply({'status':'ok','version':'0.1.0','release_id':os.environ.get('HUB_RELEASE_ID')})
                 if path == '/api/state':
                     client = text(get('client','desktop'),128)
                     focus = self.app.client_focus(client); context = focus['context_id']
@@ -316,6 +466,11 @@ class HubHandler(BaseHTTPRequestHandler):
                     reply=self.app.codex.voice(text(body['text'],2000),client,context,uid(body['id']))
                     if reply is None:raise ValueError('Use an explicit Codex command')
                     return self.reply({'id':body['id'],'reply':reply[:1500]})
+                if path == '/api/speech-pipeline':return self.reply(self.app.speech_pipeline.start(body.get('action')))
+                if path == '/api/speech-capture':
+                    if body.get('action')=='start':return self.reply(self.app.speech_capture.start(body.get('sources',[]),body.get('transcribe',True)))
+                    if body.get('action')=='stop':return self.reply(self.app.speech_capture.stop())
+                    raise ValueError('Choose start or stop')
                 if path == '/api/presence':return self.reply(self.app.incidents.presence(body['id'],body['kind'],body['label'],body['active'],body.get('idle_seconds',0)))
                 if path == '/api/deliveries/claim':return self.reply(self.app.incidents.claim(body['client']))
                 if path == '/api/deliveries/receipt':return self.reply(self.app.incidents.receipt(body['client'],body['id'],body['status'],body.get('lease'),body.get('coucou_written',False)))
@@ -380,9 +535,13 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def mobile_request(self,path,query,method):
         from home_link import MAX_IMAGE,MAX_SNAPSHOT,RevisionConflict
+        from audio_notes import MAX_AUDIO
         parts=path.split('/');device=uid(parts[2]);route=parts[3:];link=self.app.mobile.link
         try:
             if method=='GET':
+                if route==['speech-samples']:return self.reply(self.app.mobile.speech.list(int(query.get('offset',['0'])[0]),3))
+                if route==['audio-notes']:return self.reply(self.app.mobile.notes.read(offset=int(query.get('offset',['0'])[0]),limit=3))
+                if len(route)==2 and route[0]=='audio':return self.reply(self.app.mobile.notes.blob(route[1]),mime='audio/wav')
                 if route==['knowledge']:return self.reply(link.knowledge(device))
                 if route==['events']:
                     after=int(query.get('after',['0'])[0]);wait=int(query.get('wait',['0'])[0])
@@ -390,11 +549,15 @@ class HubHandler(BaseHTTPRequestHandler):
                 if len(route)==2 and route[0]=='image':return self.reply(link.image(device,route[1]),mime='application/octet-stream')
             else:
                 size=int(self.headers.get('Content-Length','0'));image=len(route)==2 and route[0]=='image'
-                if self.headers.get('Transfer-Encoding') or not 0<size<=(MAX_IMAGE if image else MAX_SNAPSHOT if route==['knowledge'] else 16384):raise ValueError('Invalid link size')
+                audio=len(route)==2 and route[0] in ('audio','speech-audio')
+                if self.headers.get('Transfer-Encoding') or not 0<size<=(MAX_AUDIO if audio else MAX_IMAGE if image else MAX_SNAPSHOT if route==['knowledge'] else 65536 if route in (['audio-notes'],['speech-samples']) else 16384):raise ValueError('Invalid link size')
                 raw=self.rfile.read(size)
                 if len(raw)!=size:raise ValueError('Incomplete request')
+                if audio:return self.reply((self.app.mobile.speech.audio if route[0]=='speech-audio' else self.app.mobile.notes).blob(route[1],raw))
                 if image:return self.reply(link.image(device,route[1],raw))
                 body=json.loads(raw)
+                if route==['speech-samples']:return self.reply(self.app.mobile.speech.put(device,body))
+                if route==['audio-notes']:return self.reply(self.app.mobile.audio_note(device,body))
                 if route==['knowledge']:return self.reply(self.app.mobile.sync(device,body))
                 if route==['events']:return self.reply(link.publish(device,body))
                 if route==['ack'] and set(body)=={'through'}:return self.reply(link.ack(device,body['through']))

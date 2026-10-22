@@ -1,0 +1,46 @@
+# Load the tested images first (docker load), then paste into Apps > Install via YAML.
+# Create these directories on the nvme pool; data directories must be owned by 10001:10001.
+# The two token files must be readable by UID 10001. Keep this YAML free of secrets.
+services:
+  hub:
+    image: assistant-hub:dev-20261021.2
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    ports:
+      - "100.64.0.10:8778:8778" # Replace with this NAS's private/VPN IP.
+    environment:
+      HUB_OWNER_TOKEN_FILE: /run/secrets/owner-token
+      HUB_HTTP_ORIGINS: http://truenas.example:8778,http://hub:8778
+      # Set the actual model server before enabling incident assessment.
+      HUB_OLLAMA_URL: http://ollama:11434
+      HUB_OLLAMA_MODEL: qwen3:4b-instruct-2507-q4_K_M
+      HUB_INCIDENT_TIMEOUT_SECONDS: "300"
+    volumes:
+      - /mnt/nvme/assistant-hub/hub:/data
+      - /mnt/nvme/assistant-hub/secrets/owner-token:/run/secrets/owner-token:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+  collectors:
+    image: assistant-hub-collectors:dev-20261021
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    depends_on:
+      hub:
+        condition: service_healthy
+    volumes:
+      - /mnt/nvme/assistant-hub/collectors:/data
+      - /mnt/nvme/assistant-hub/config:/config:ro
+      - /mnt/nvme/assistant-hub/secrets/collector-token:/run/secrets/collector-token:ro
+      - /mnt/nvme/assistant-hub/plugins:/plugins:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 330s

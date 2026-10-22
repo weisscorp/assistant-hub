@@ -2,3 +2,8 @@
 
 #incident-list pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px}#incident-list summary{cursor:pointer;padding:12px 0}#incident-list{margin-bottom:28px}
 #codex-report-dialog{width:min(760px,90vw);max-height:85dvh;overflow:auto}#codex-report-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60dvh;overflow:auto;font:inherit;font-size:14px;line-height:1.65}
+
+/* Access settings */
+.access-form{display:grid;gap:12px;max-width:640px}.access-form input,.access-form select,#new-key{width:100%;min-width:0}.access-form label{font-size:14px;color:var(--muted)}#current-password-field{display:grid;gap:12px}#current-password-field[hidden]{display:none}#legacy-login{margin-top:24px}#legacy-login summary{cursor:pointer;color:var(--muted)}#token-login-form{margin-top:16px}#login-form{display:grid;gap:12px}#access-keys h4{margin:0}#new-key{font-family:monospace}#logout{margin-top:12px}
+
+#account-settings{margin:16px 0 24px;max-width:640px}#account-settings summary{cursor:pointer;padding:12px 0}#account-settings[open] summary{margin-bottom:12px}

@@ -1,15 +1,38 @@
-# API keys and Internet access
+# Owner login, application keys and HTTPS access
 
 Hub can sit behind an HTTPS reverse proxy and require a key for every data/API
 request. It still binds only a literal loopback/private/VPN address. The login
 page and its static JS/CSS are public; history, knowledge, tools, health, models,
 mobile sync and conversations require authentication.
 
-This is a **single-owner** service. Each owner key grants full API
-access, including configured agents and node actions; keys are not separate user
-accounts or per-node grants. Issue them only to your own trusted clients.
+This is a **single-owner** service. The owner signs into the panel with a login
+and password. Application keys grant access to Hub data, configured agents and
+node actions; they are not separate user accounts or per-node grants. Keys do
+not administer the owner account or other keys. Issue them only to your own
+trusted applications. Legacy `owner` keys retain their data/API compatibility,
+but account/key management requires a password-authenticated owner session.
 Webhook keys can only publish incidents; MCP keys/grants can only access the
 [dot MCP endpoint](dot-integration.md) and its bounded tools for active requests.
+
+## Set up owner login
+
+For the first setup only, authenticate with an existing owner key or the local
+launcher's one-use ticket. Open **Доступ**, choose a login (3–64 ASCII letters,
+digits, `. _ @ -`) and a password of at least 12 characters. The account is stored
+in the existing private Hub database; only a random salt and scrypt hash
+(N=32768, r=8, p=1) are stored. Passwords and API secrets are never placed in web
+storage or logs. Normal future sign-in uses the login/password form.
+
+Changing the login/password requires the current password and invalidates all
+older account sessions. Signing out invalidates the current server session.
+Application keys keep working across password changes. Failed password attempts
+are rate limited before further password hashing. Browser POST requests require
+the exact origin; HTTPS cookies are Secure, HttpOnly and SameSite=Strict.
+
+**Доступ** supports named keys for Hub data/assistant, event producers and MCP.
+Revocation takes effect on the next request without restarting Hub. Existing
+Coucou/mobile keys are preserved during migration. Never reuse one key for all
+applications, and never put a browser password into an application's bearer field.
 
 ## Create a client key
 
@@ -28,8 +51,9 @@ For another runtime, put `--config /absolute/private/runtime/config.json` before
 the command. Creation writes a **new** mode-0600 file, refuses overwrites/symlinks
 and prints only the key ID, name and path. The random secret is not printed or
 stored in conversations. Only its SHA-256 digest is stored in private SQLite.
-There is a limit of 128 active client keys. Creation/revocation is local CLI
-administration; no owner HTTP endpoint issues API keys. The optional dot OAuth
+There is a limit of 128 active client keys. The password-authenticated owner can
+create, list and revoke keys in **Доступ**. A newly created secret is shown once;
+list responses never return it. Local CLI administration remains available. The optional dot OAuth
 flow issues separate access/refresh tokens only after owner consent.
 
 Send the secret as `Authorization: Bearer <key>`, including for the standard
@@ -82,7 +106,7 @@ an arbitrary forwarded hostname to select an origin. An optional
 `X-Forwarded-For` must be one IP address, **overwritten** by the trusted proxy;
 it is used only to count failed authentication, not to authorize access.
 
-The browser accepts the same API key at login, then uses a 24-hour HttpOnly,
+The browser accepts a login/password, then uses a 24-hour HttpOnly,
 SameSite=Strict cookie, with **Secure** on the public HTTPS origin. Browser
 sessions and one-use 60-second login tickets are bound to their issuing origin;
 cookie-authenticated POSTs also require that exact Origin. Tokens are not put in

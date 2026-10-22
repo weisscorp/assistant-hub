@@ -1,0 +1,21 @@
+{
+  "providers": {
+    "auto": {
+      "type": "routing",
+      "general": "ollama",
+      "coding": "mausbot",
+      "classifier": "ollama"
+    },
+    "ollama": {
+      "type": "ollama",
+      "url": "http://127.0.0.1:11434",
+      "model": "qwen3:4b-instruct-2507-q4_K_M"
+    },
+    "mausbot": {
+      "type": "mausbot",
+      "url": "http://127.0.0.1:3000",
+      "bot_id": "replace-with-coding-bot-id",
+      "token_file": "/private/path/to/mausbot-token"
+    }
+  }
+}

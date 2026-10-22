@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>События · Assistant Hub</title><link rel="stylesheet" href="/awareness.css"><script defer src="/awareness.js"></script></head>
+<body><main><header><a href="/">Assistant Hub /</a><span>Локальный прототип</span></header>
+<section class="intro"><p class="eyebrow">КОНТЕКСТ ПОД РУКОЙ</p><h1>Что требует внимания</h1><p>События из рабочих каналов и агентов. Основной интерфейс — ваш Android-ассистент.</p></section>
+<form id="login" hidden><label for="token">Ключ владельца Hub</label><input id="token" type="password" autocomplete="off" required><button>Войти</button></form>
+<p id="feedback" role="status" aria-live="polite"></p>
+<section aria-label="Источники" id="sources" class="sources"></section>
+<details><summary>Куда направляются сообщения</summary><div id="routes"></div><p>Владелец контекста хранит историю. Hub передаёт текущий запрос и ссылки на RCP / чат агента.</p></details>
+<section class="card"><h2>Проверить диалог Android</h2><p class="meta">Этот пульт использует тот же /conversation, что текст и распознанная речь в приложении.</p><form id="turn-form"><label for="message">Сообщение ассистенту</label><input id="message" maxlength="2000" required placeholder="Что на работе? / Что в проекте?"><button class="primary">Отправить</button></form><p id="reply" role="status" aria-live="polite"></p></section>
+<div class="toolbar"><label for="filter">Показать <select id="filter"><option value="active">Открытые вопросы</option><option value="all">Все ситуации</option><option value="closed">Закрытые</option></select></label><button id="refresh">Обновить</button><button id="demo">Добавить демо-события</button></div>
+<div id="cases"></div><footer>Разбор по явным меткам источника. Нейросетевой анализ и постоянные подключения Slack / Telegram ещё не включены.</footer>
+</main></body></html>

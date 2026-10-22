@@ -272,4 +272,83 @@ class PublicApiTests(unittest.TestCase):
             client.close()
 
 
+
+
+class PasswordApiTests(unittest.TestCase):
+    setUp = PublicApiTests.setUp
+    tearDown = PublicApiTests.tearDown
+    request = PublicApiTests.request
+    origin = {'Origin':'https://hub.example.com'}
+
+    def setup_account(self):
+        result=self.request('/api/account', self.key, {'username':'Vlad','password':'synthetic-password-123'})
+        self.assertEqual(result[0],200)
+        return {'Cookie':result[1]['Set-Cookie'].split(';')[0],**self.origin}
+
+    def test_bootstrap_requires_owner_then_keys_cannot_manage_account(self):
+        self.assertEqual(json.loads(self.request('/api/auth/status')[2]),{'configured':False})
+        self.assertEqual(self.request('/api/account',body={'username':'vlad','password':'synthetic-password-123'})[0],401)
+        cookie=self.setup_account()
+        self.assertEqual(self.request('/api/account',self.key)[0],403)
+        self.assertEqual(self.request('/api/access-keys',self.key)[0],403)
+        self.assertEqual(self.request('/api/account',headers=cookie)[0],200)
+        with self.app.store.connect() as db:
+            row=dict(db.execute('SELECT * FROM web_account').fetchone())
+        self.assertNotIn('synthetic-password-123',json.dumps(row));self.assertEqual(len(row['password_hash']),64)
+
+    def test_public_login_navigation_does_not_allow_cross_site_data_access(self):
+        self.assertEqual(self.request('/',headers={'Sec-Fetch-Site':'cross-site','Sec-Fetch-Mode':'navigate'})[0],200)
+        self.assertEqual(self.request('/api/state',self.key,headers={'Sec-Fetch-Site':'cross-site','Sec-Fetch-Mode':'navigate'})[0],401)
+
+    def test_password_login_csrf_logout_and_restart(self):
+        self.setup_account();credentials={'username':'VLAD','password':'synthetic-password-123'}
+        self.assertEqual(self.request('/api/login',body=credentials)[0],403)
+        self.assertEqual(self.request('/api/login',body={**credentials,'password':'wrong'},headers=self.origin)[0],401)
+        status,headers,_=self.request('/api/login',body=credentials,headers=self.origin)
+        self.assertEqual(status,200);self.assertIn('Secure',headers['Set-Cookie'])
+        cookie={'Cookie':headers['Set-Cookie'].split(';')[0],**self.origin}
+        self.assertEqual(self.request('/api/state',headers=cookie)[0],200)
+        self.assertEqual(self.request('/api/logout',body={},headers=cookie)[0],200)
+        self.assertEqual(self.request('/api/state',headers=cookie)[0],401)
+        from hub_auth import WebAccount
+        self.assertIsNotNone(WebAccount(self.app.store).verify('vlad',credentials['password']))
+
+    def test_password_change_invalidates_other_sessions_not_app_keys(self):
+        cookie=self.setup_account()
+        self.assertEqual(self.request('/api/account',body={'username':'vlad','password':'replacement-password-123','current_password':'bad'},headers=cookie)[0],403)
+        status,headers,_=self.request('/api/account',body={'username':'vlad','password':'replacement-password-123','current_password':'synthetic-password-123'},headers=cookie)
+        self.assertEqual(status,200);self.assertEqual(self.request('/api/state',headers=cookie)[0],401)
+        self.assertEqual(self.request('/api/state',self.key)[0],200)
+        self.assertEqual(self.request('/api/account',headers={'Cookie':headers['Set-Cookie'].split(';')[0]})[0],200)
+
+    def test_issue_list_revoke_and_scope_boundaries(self):
+        cookie=self.setup_account();status,_,data=self.request('/api/access-keys',body={'name':'Synthetic phone','scope':'app'},headers=cookie)
+        self.assertEqual(status,201);issued=json.loads(data);key=issued['token']
+        self.assertEqual(self.request('/api/state',key)[0],200)
+        for path in ['/api/access-keys','/api/account']:
+            self.assertEqual(self.request(path,key)[0],403)
+        self.assertEqual(self.request('/api/account',key,{'username':'evil','password':'evil-password-123'})[0],403)
+        self.assertEqual(self.request('/api/tickets',key,{})[0],403)
+        self.assertEqual(self.request('/api/login',body={'token':key})[0],403)
+        self.assertNotIn(key.encode(),self.request('/api/access-keys',headers=cookie)[2])
+        self.assertEqual(self.request('/api/access-keys',body={'name':'Bad admin','scope':'owner'},headers=cookie)[0],400)
+        self.assertEqual(self.request('/api/access-keys/revoke',body={'id':issued['key']['id']},headers=cookie)[0],200)
+        self.assertEqual(self.request('/api/state',key)[0],401);self.assertEqual(self.request('/api/state',self.key)[0],200)
+
+    def test_weak_password_validation_and_password_rate_limit(self):
+        self.assertEqual(self.request('/api/account',self.key,{'username':'vlad','password':'short'})[0],400)
+        self.setup_account()
+        for _ in range(20):self.assertEqual(self.request('/api/login',body={'username':'vlad','password':'bad'},headers=self.origin)[0],401)
+        with patch.object(self.app.account,'verify',side_effect=AssertionError('KDF must not run')):
+            self.assertEqual(self.request('/api/login',body={'username':'vlad','password':'bad'},headers=self.origin)[0],429)
+        self.assertEqual(self.request('/api/state',self.key)[0],200)
+
+    def test_expired_session_polling_does_not_lock_out_password_login(self):
+        self.setup_account()
+        for _ in range(25):
+            self.assertIn(self.request('/api/state',headers={'Cookie':'hub_session=expired-session'})[0],{401,429})
+        result=self.request('/api/login',body={'username':'vlad','password':'synthetic-password-123'},headers=self.origin)
+        self.assertEqual(result[0],200)
+        self.assertEqual(self.request('/api/account',headers={'Cookie':result[1]['Set-Cookie'].split(';')[0],**self.origin})[0],200)
+
 if __name__ == '__main__':unittest.main()

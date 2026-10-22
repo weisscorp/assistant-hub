@@ -1,0 +1,8 @@
+# Use a separate training venv. Upstream T-one's finetune extra is also required.
+faster-whisper==1.2.1
+soundfile==0.13.1
+scipy==1.16.2
+jiwer==4.0.0
+
+# faster-whisper 1.2.1 still passes metadata_errors, removed in PyAV 19.
+av==16.1.0

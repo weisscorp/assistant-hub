@@ -1,0 +1,44 @@
+[hub]
+url = "http://hub:8778"
+token_env = "COLLECTOR_HUB_TOKEN"
+targets = "auto"
+
+[runtime]
+state = "/data/collectors"
+workers = 4
+max_pending = 1000
+retention_days = 7
+
+# Replace this example with your own read-only API. Only selected data is sent.
+[[sources]]
+id = "service-health"
+plugin = "hub_collector_plugins:HttpStatus"
+title = "Состояние сервиса"
+interval_seconds = 60
+timeout_seconds = 15
+mode = "changes"
+[sources.options]
+url = "http://example-service:8080/health"
+request_timeout_seconds = 10
+
+# JSON API example (remove the leading # to enable):
+# [[sources]]
+# id = "workloads"
+# plugin = "hub_collector_plugins:HttpJson"
+# title = "Изменения рабочих нагрузок"
+# interval_seconds = 30
+# timeout_seconds = 15
+# [sources.options]
+# url = "https://service.example/api/jobs"
+# token_env = "WORKLOAD_API_TOKEN"
+# pointer = "/data/jobs"
+# items = true
+# id_pointer = "/id"
+
+# [[sources]]
+# id = "hourly"
+# plugin = "hub_collector_plugins:Clock"
+# title = "Почасовая проверка"
+# interval_seconds = 60
+# [sources.options]
+# period_seconds = 3600

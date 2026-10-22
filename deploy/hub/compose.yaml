@@ -1,0 +1,53 @@
+name: assistant-hub
+services:
+  hub:
+    image: ${HUB_IMAGE:-assistant-hub:local}
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+      target: hub
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${HUB_PUBLISH_IP:-127.0.0.1}:${HUB_PUBLISH_PORT:-8778}:8778"
+    environment:
+      HUB_OWNER_TOKEN: ${HUB_OWNER_TOKEN:?Set HUB_OWNER_TOKEN in a private env file}
+      HUB_HTTP_ORIGINS: ${HUB_HTTP_ORIGINS:-http://localhost:8778,http://127.0.0.1:8778,http://hub:8778}
+      HUB_OLLAMA_URL: ${HUB_OLLAMA_URL:-http://host.docker.internal:11434}
+      HUB_OLLAMA_MODEL: ${HUB_OLLAMA_MODEL:-qwen3:4b-instruct-2507-q4_K_M}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - hub-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+  collectors:
+    profiles: [collectors]
+    image: ${COLLECTOR_IMAGE:-assistant-hub-collectors:local}
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+      target: collectors
+    restart: unless-stopped
+    init: true
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      COLLECTOR_HUB_TOKEN: ${COLLECTOR_HUB_TOKEN:-}
+    volumes:
+      - ${COLLECTOR_CONFIG:-./collectors.example.toml}:/config/collectors.toml:ro
+      - collectors-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 330s
+volumes:
+  hub-data:
+  collectors-data:

@@ -145,6 +145,19 @@ class NormalizationTests(unittest.TestCase):
         for value in ['invalid', None, '0001-01-01T00:00:00Z', '2026-01-01T00:00:00']:
             self.assertIsNone(instant(value))
 
+    def test_unknown_status_is_not_overridden_by_activity(self):
+        for raw in ['future_status', None, '']:
+            for state in ['active', 'idle', 'waiting_input', 'blocked']:
+                for event in ['2026-10-22T10:00:00Z', '2026-10-21T08:00:00Z']:
+                    with self.subTest(status=raw, state=state, event=event):
+                        row = normalize(self.row(status=raw, activity={'state': state},
+                                                 lastEventAt=event), NOW, 3600)
+                        self.assertEqual(row['status'], 'unknown')
+                        self.assertEqual(row['status_label'], 'неизвестно')
+                        self.assertEqual(row['raw_status'], raw)
+                        self.assertIsNone(row['blocker'])
+                        self.assertIsNone(row['expected_decision'])
+
     def test_stale_threshold_is_configurable_and_waits_stay_waits(self):
         self.assertEqual(normalize(self.row(), NOW, 300)['status'], 'stale')
         self.assertEqual(normalize(self.row(), NOW, 301)['status'], 'working')

@@ -21,6 +21,14 @@ LABELS = {
     'stale': 'давно нет прогресса', 'unknown': 'неизвестно',
 }
 
+# AO's current session-status enum. Future values require an explicit policy;
+# activity alone must not turn an unrecognized status into confirmed progress.
+KNOWN_STATUSES = (
+    'working', 'pr_open', 'draft', 'ci_failed', 'review_pending',
+    'changes_requested', 'commented', 'approved', 'mergeable', 'merged',
+    'needs_input', 'exited', 'idle', 'terminated', 'no_signal',
+)
+
 
 def instant(value):
     """AO HTTP timestamps are RFC3339; missing/invalid times stay unknown."""
@@ -52,6 +60,8 @@ def normalize(session, observed_at, stale_after):
     if ready:
         if session.get('isTerminated') or state == 'exited':
             reason = 'Session stopped; task completion is not established.'
+        elif raw not in KNOWN_STATUSES:
+            reason = 'AO status is unrecognized; activity cannot establish task state.'
         elif state == 'blocked':
             status, reason = 'blocked', 'AO reports a pending permission or approval decision.'
             blocker = 'Pending AO decision; exact details are not supplied by the session list.'

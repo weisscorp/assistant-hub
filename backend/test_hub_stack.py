@@ -148,7 +148,8 @@ class HubTests(unittest.TestCase):
         self.assertEqual(self.app.store.task(row['id'])['status'],'unknown');self.assertEqual(self.fixture.calls,0)
 
     def test_openai_alias_topic_binding_stream_and_error_answer(self):
-        model=next(m['id'] for m in self.request('/v1/models')['data'] if m['id'].endswith(self.context))
+        model='hub/fixture/'+self.context
+        self.assertIn(model,[m['id'] for m in self.request('/v1/models')['data']])
         body={'model':model,'messages':[{'role':'user','content':'Привет'}]}
         result=self.request('/v1/chat/completions',body)
         self.assertEqual(result['choices'][0]['message']['content'],'Факты:')
@@ -156,6 +157,7 @@ class HubTests(unittest.TestCase):
         r=urllib.request.Request(self.url+'/v1/chat/completions',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
         with urllib.request.urlopen(r,timeout=5) as response:wire=response.read().decode()
         self.assertIn('data: [DONE]',wire);self.assertIn('Факты:',wire)
+        self.assertEqual(self.fixture.calls,2)
 
     def test_phone_contract_knowledge_sync_and_scoped_coucou_access(self):
         device=str(uuid.uuid4());source=str(uuid.uuid4())

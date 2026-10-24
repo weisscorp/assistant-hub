@@ -1,0 +1,4 @@
+# Synthetic audio fixtures only; no ASR models or training runtime required.
+numpy==2.3.4
+scipy==1.16.2
+soundfile==0.13.1

@@ -1,0 +1,98 @@
+# Disposable synthetic stack, driven by: python3 tools/verify_hub_containers.py
+# No fixed container names, host data, real model, credentials or Docker socket.
+x-sandbox: &sandbox
+  restart: "no"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+  labels:
+    ao.session: ${AO_SESSION_ID:-standalone}
+  networks: [test]
+services:
+  unit:
+    profiles: [unit]
+    image: python:3.13-slim-bookworm
+    platform: ${HUB_TEST_PLATFORM:-linux/amd64}
+    working_dir: /workspace
+    labels:
+      ao.session: ${AO_SESSION_ID:-standalone}
+    networks: [test]
+    environment:
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+      - ../../backend:/workspace/backend:ro
+      - ../../tools:/workspace/tools:ro
+      - ../../data/speech-glossary.json:/workspace/data/speech-glossary.json:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
+        apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 update -qq
+        apt-get install -y --no-install-recommends git ffmpeg libsndfile1 libspeexdsp1
+        python -m pip install --no-cache-dir -r tools/test-requirements.txt
+        useradd --uid 10001 --no-create-home --home-dir /tmp hub-tests
+        runuser -u hub-tests -- python -m unittest discover -s backend -p 'test_*.py' -q
+        runuser -u hub-tests -- python -m unittest discover -s tools -p 'test_check_ghcr_visibility.py' -q
+        runuser -u hub-tests -- python tools/benchmark_knowledge.py --facts 1000 --repetitions 5
+  model:
+    <<: *sandbox
+    image: ${HUB_TEST_HUB_IMAGE:?Set by verify_hub_containers.py}
+    platform: ${HUB_TEST_PLATFORM:-linux/amd64}
+    entrypoint: [python3, /fixtures/fixture.py]
+    volumes:
+      - ${HUB_TEST_FIXTURES:?Set by verify_hub_containers.py}:/fixtures:ro
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11434/api/tags', timeout=2).read()"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  hub:
+    <<: *sandbox
+    image: ${HUB_TEST_HUB_IMAGE:?Set by verify_hub_containers.py}
+    platform: ${HUB_TEST_PLATFORM:-linux/amd64}
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+      target: hub
+    depends_on:
+      model:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::8778"
+    environment:
+      HUB_OWNER_TOKEN_FILE: /fixtures/owner-token
+      HUB_CONFIG_FILE: /fixtures/hub.json
+      HUB_HTTP_ORIGINS: http://hub:8778
+    volumes:
+      - hub-data:/data
+      - ${HUB_TEST_FIXTURES:?Set by verify_hub_containers.py}:/fixtures:ro
+    healthcheck:
+      test: [CMD, python3, hub_container.py, healthcheck]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+  collectors:
+    <<: *sandbox
+    image: ${HUB_TEST_COLLECTOR_IMAGE:?Set by verify_hub_containers.py}
+    platform: ${HUB_TEST_PLATFORM:-linux/amd64}
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+      target: collectors
+    depends_on:
+      hub:
+        condition: service_healthy
+    volumes:
+      - collectors-data:/data
+      - ${HUB_TEST_FIXTURES:?Set by verify_hub_containers.py}:/fixtures:ro
+    command: [run, --config, /fixtures/collectors.toml]
+volumes:
+  hub-data:
+  collectors-data:
+networks:
+  test: {}

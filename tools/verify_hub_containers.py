@@ -66,7 +66,7 @@ def main():
             fixture.chmod(0o644)  # Disposable data must be readable by container UID 10001.
         try:
             if args.unit_tests:
-                print(compose('run', '--rm', '--no-deps', 'unit', timeout=1200))
+                print(compose('run', '--rm', '--no-deps', 'unit', timeout=3600))
             if not args.hub_image:
                 compose('build', 'hub', 'collectors', timeout=600)
             compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '90', 'model', 'hub')
@@ -155,7 +155,10 @@ pointer="/data"
             raise
         finally:
             # Scoped to a random project; never prunes or stops other host containers.
-            compose('down', '-v', '--remove-orphans', timeout=120)
+            if args.unit_tests:
+                compose('--profile', 'unit', 'down', '-v', '--remove-orphans', timeout=120)
+            else:
+                compose('down', '-v', '--remove-orphans', timeout=120)
 
 
 if __name__ == '__main__':

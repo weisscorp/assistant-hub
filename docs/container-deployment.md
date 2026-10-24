@@ -46,6 +46,13 @@ Add `--unit-tests` to run the full backend suite and knowledge benchmark in a
 disposable Python 3.13 Compose service first, including synthetic audio test
 dependencies. Dependencies are installed inside that disposable container;
 the host Python environment and source mounts remain unchanged.
+The unit service includes Git for disposable repository fixtures and mounts only
+the tracked public `data/speech-glossary.json` seed read-only; no private corpus,
+runtime configuration or host application state is mounted.
+The optional unit step allows up to 60 minutes for installing dependencies and
+running the suite on slow local networks.
+Dependencies install as root; tests and the benchmark run as synthetic UID 10001
+with a temporary home and read-only source/seed mounts.
 
 This drives `deploy/hub/compose.test.yaml`: Hub, collectors and a synthetic
 Ollama/source server, a random `hub-smoke-...` project name, temporary fixtures

@@ -25,17 +25,19 @@ services:
     volumes:
       - ../../backend:/workspace/backend:ro
       - ../../tools:/workspace/tools:ro
+      - ../../data/speech-glossary.json:/workspace/data/speech-glossary.json:ro
     command:
       - /bin/sh
       - -ec
       - |
         sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
         apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 update -qq
-        apt-get install -y --no-install-recommends ffmpeg libsndfile1 libspeexdsp1
+        apt-get install -y --no-install-recommends git ffmpeg libsndfile1 libspeexdsp1
         python -m pip install --no-cache-dir -r tools/test-requirements.txt
-        python -m unittest discover -s backend -p 'test_*.py' -q
-        python -m unittest discover -s tools -p 'test_check_ghcr_visibility.py' -q
-        python tools/benchmark_knowledge.py --facts 1000 --repetitions 5
+        useradd --uid 10001 --no-create-home --home-dir /tmp hub-tests
+        runuser -u hub-tests -- python -m unittest discover -s backend -p 'test_*.py' -q
+        runuser -u hub-tests -- python -m unittest discover -s tools -p 'test_check_ghcr_visibility.py' -q
+        runuser -u hub-tests -- python tools/benchmark_knowledge.py --facts 1000 --repetitions 5
   model:
     <<: *sandbox
     image: ${HUB_TEST_HUB_IMAGE:?Set by verify_hub_containers.py}

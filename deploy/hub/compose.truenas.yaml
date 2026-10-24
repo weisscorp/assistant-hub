@@ -1,10 +1,14 @@
-# Load the tested images first (docker load), then paste into Apps > Install via YAML.
+# Copy the exact private GHCR tags or @sha256 digests from the Hub images CI summary.
+# REPLACE_WITH_CI_TAG is deliberately not a deployable default. Never use :latest.
+# Configure read-only GHCR credentials in TrueNAS first, outside this YAML/Git.
+# Then paste into Apps > Install via YAML; subsequent changes are manual app edits.
 # Create these directories on the nvme pool; data directories must be owned by 10001:10001.
 # The two token files must be readable by UID 10001. Keep this YAML free of secrets.
 services:
   hub:
-    image: assistant-hub:dev-20261021.2
-    pull_policy: never
+    image: ghcr.io/weisscorp/assistant-hub:REPLACE_WITH_CI_TAG
+    platform: linux/amd64
+    pull_policy: missing
     restart: unless-stopped
     init: true
     ports:
@@ -26,8 +30,9 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 30s
   collectors:
-    image: assistant-hub-collectors:dev-20261021
-    pull_policy: never
+    image: ghcr.io/weisscorp/assistant-hub-collectors:REPLACE_WITH_CI_TAG
+    platform: linux/amd64
+    pull_policy: missing
     restart: unless-stopped
     init: true
     depends_on:

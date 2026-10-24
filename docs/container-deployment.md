@@ -6,23 +6,59 @@ SQLite outbox → `POST /webhooks/events`. No additional broker is needed for th
 single-host deployment. Both images use Python's standard library, run as
 `10001:10001`, and support a read-only root filesystem. Models run elsewhere.
 
-## Build and verify
+## CI images and local verification
 
-From the repository root:
+Production images are built on GitHub-hosted runners by
+`.github/workflows/hub-images.yml`, on pushes to `main`, tags and manual
+`workflow_dispatch`. The backend test matrix in `tests.yml` (Python 3.11/3.13)
+and the synthetic Compose smoke must pass before publication. Both Dockerfile
+targets are published for `linux/amd64` (TrueNAS); a manual dispatch can also
+select `arm64`. Dispatch from a feature branch builds without publishing.
+
+Private packages:
+
+- `ghcr.io/weisscorp/assistant-hub`
+- `ghcr.io/weisscorp/assistant-hub-collectors`
+
+Tags have the form `<main-or-version>-sha-<12-char-SHA>-run-<run-id>-<attempt>`;
+for example `v1.2.0-sha-0123456789ab-run-123456789-1`. Run/attempt suffixes
+prevent reruns from replacing an earlier image. There are no moving `latest`,
+branch or version aliases. The per-image Actions summary records the tag, full
+source SHA and immutable `image@sha256:...` digest. Prefer that digest for
+deployment. Keep both image references from the same successful run for rollback.
+
+All third-party actions are pinned by commit. Workflow permissions default to
+`contents: read`; only the trusted publication job gets `packages: write` and
+uses `GITHUB_TOKEN`. PRs, including forks, run tests, smoke and both amd64 builds
+without registry login or publication. No repository secrets are passed to the
+reusable tests. An existing non-private GHCR package blocks publication. New
+GHCR packages default to private; leave visibility private even though this
+source repository is public ([GHCR documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)).
+
+Local development/testing uses Docker Compose on this host. From the repository
+root, one command builds both targets and runs the full synthetic smoke:
 
 ```sh
-docker build --platform linux/amd64 --target hub -f deploy/hub/Dockerfile \
-  -t assistant-hub:dev-20261021.2 .
-docker build --platform linux/amd64 --target collectors -f deploy/hub/Dockerfile \
-  -t assistant-hub-collectors:dev-20261021 .
-python3 -m unittest discover -s backend -p 'test_hub*.py' -q
 python3 tools/verify_hub_containers.py
 ```
 
-The Docker smoke test uses a synthetic Ollama HTTP server, private temporary
-volumes and generated disposable credentials. It verifies assessment, restart
-persistence, duplicate suppression, producer scopes and malformed JSON rejection.
-It does not contact user accounts, physical devices or paid models.
+Add `--unit-tests` to run the full backend suite and knowledge benchmark in a
+disposable Python 3.13 Compose service first, including synthetic audio test
+dependencies. Dependencies are installed inside that disposable container;
+the host Python environment and source mounts remain unchanged.
+
+This drives `deploy/hub/compose.test.yaml`: Hub, collectors and a synthetic
+Ollama/source server, a random `hub-smoke-...` project name, temporary fixtures
+and project-scoped volumes. Only Hub's random loopback port is published. The
+runner always calls `docker compose ... down -v --remove-orphans` in `finally`,
+including on smoke failure. It never prunes Docker or touches existing projects.
+Session-owned containers have an `ao.session` label. Default platform is amd64;
+`--platform linux/arm64` is available for native local testing. To test already
+built images, pass both `--hub-image IMAGE` and `--collector-image IMAGE`.
+
+The smoke verifies assessment, restart persistence, duplicate suppression,
+producer scopes and malformed JSON rejection. It uses disposable credentials
+and no user accounts, physical devices, audio, model downloads or paid models.
 
 The root `.dockerignore` allowlists application source. Databases, recordings,
 runtime config, credentials, models, repository metadata and tests are excluded.
@@ -52,8 +88,8 @@ Use separate volumes per service, one Hub replica, one collector replica, and
 Recreate during updates. Do not share live SQLite files over SMB/NFS.
 
 Each HTTP origin is explicit; unknown Host/Origin and untrusted forwarded
-headers remain rejected. HTTP aliases are for the owner's private LAN/VPN.
-Internet access continues to require the documented HTTPS proxy configuration.
+headers remain rejected. HTTP aliases are for the owner's private tailnet.
+This deployment must not have public ingress, port forwarding or Tailscale Funnel.
 The TrueNAS installer publishes port 8778 only on the selected Tailscale IP.
 
 For local Compose, set an owner token in a private env file and run:
@@ -73,8 +109,62 @@ into shared logs. The collector never needs the owner key.
 TrueNAS supports custom Compose apps through **Apps → Discover Apps → Install
 via YAML**. See the [official installation guide](https://apps.truenas.com/managing-apps/installing-custom-apps/).
 `deploy/hub/compose.truenas.yaml` is an example for `/mnt/nvme/assistant-hub`.
-Its image tags must first be loaded into Docker or replaced with your registry
-references. Configure the actual Ollama URL/model; it does not start a model server.
+Replace both `REPLACE_WITH_CI_TAG` references with exact tags from a successful
+Hub images run, or replace each whole image value with its `ghcr.io/...@sha256:...`
+reference. The placeholders deliberately cannot install an arbitrary default.
+No build or `docker load` is needed on the NAS. Configure the actual Ollama
+URL/model; this app does not start a model server. Set the NAS's actual Tailscale
+IP and matching HTTP origins. Keep port 8778 bound only to that IP; retain the
+private host mounts and UID 10001 permissions.
+
+### Read-only private GHCR access
+
+The owner creates a dedicated GitHub pull account with **Read** access to both
+private packages and a PAT **classic** with only `read:packages` (no write/delete
+or broad repository scope). Authorize organization SSO if required. In TrueNAS
+Apps, use **Configuration → Sign-in to a Docker registry → Add Registry → Other
+Registry**: URI `https://ghcr.io`, the pull account username and token as password
+([TrueNAS registry guide](https://apps.truenas.com/getting-started/initial-setup/)).
+Keep these credentials in TrueNAS credential storage; do not paste them into
+Compose YAML, the repository, CI variables, Hub settings or shared logs.
+`GITHUB_TOKEN` is only for Actions publication and is not a NAS credential.
+
+For an owner-run diagnostic in the NAS Shell, use `docker login ghcr.io
+--username ACCOUNT --password-stdin` with a private token input, then pull the
+exact digest. Do not put the token in command arguments or shell history. A
+Shell login alone may not configure app-managed pulls; use the registry UI for
+the app. If access fails, check account package permissions/SSO/token expiry;
+do not make packages public to work around it.
+
+### Manual update and rollback
+
+There is no automatic deployment, image switch, updater, SSH or NAS access in
+the workflow. The owner performs these steps in the TrueNAS UI:
+
+1. Choose a fully successful CI run. Save its two exact image digests, current
+   app YAML/configuration, previous image digests and the source revision.
+2. Wait for Hub tasks to finish, stop this app and take a consistent dataset
+   snapshot/backup covering Hub SQLite state and collector outbox. Do not copy
+   live SQLite files or reset credentials. Retain this backup and previous images.
+3. Edit this app's YAML, changing only the two `image` values to the new explicit
+   tags/digests. Keep volumes, secrets, model settings and tailnet binding.
+   Apply the edit/start the app; TrueNAS pulls the private images with the stored
+   read-only account (`pull_policy: missing`). Do not rerun a first-install script.
+4. Over the tailnet, check authenticated Hub health, history, collector status
+   and one owner-selected event before accepting the update. Record the running
+   image digests and backup reference. CI smoke is synthetic, not NAS verification.
+5. To roll back, stop the app and edit both image values back to the saved pair,
+   then start and repeat the checks. If a release changed the persisted schema
+   incompatibly, restore the matching pre-update snapshot while stopped before
+   starting old code. Restoration loses post-snapshot changes; the owner must
+   decide that explicitly. Never delete volumes or silently restore a database.
+
+### Existing archive/source updater (legacy)
+
+The following tools describe an older, separately enabled path. They are not
+used or enabled by the GHCR workflow above. Prefer CI images and manual app
+updates for the current deployment policy; do not build release artifacts on
+the NAS or enable the source updater as part of a container update.
 
 `tools/install_hub_truenas.py` automates first installation through the supported
 `pool.dataset.create` and `app.create` middleware methods. Run it in the owner's
@@ -93,8 +183,8 @@ updates or public listeners are installed. The optional transfer helper serves
 only the installer and image archive, only to the specified NAS peer, with a
 random path and a finite lifetime. Stop it immediately after transfer.
 
-For ordinary Python/UI updates, install the pinned `backend/hub_updates.py`
-supervisor once and then use **Hub → Обновления**. It runs inside the existing
+Existing installations may have the pinned `backend/hub_updates.py`
+supervisor and **Hub → Обновления** enabled. It runs inside the existing
 unprivileged container, without a Docker socket or TrueNAS administrator token.
 The container entrypoint becomes `python3 /data/updater/hub_updates.py`, with
 `supervise --root /data/updates --initial RELEASE` as its command and
@@ -145,7 +235,7 @@ failure limits.
 This source-update channel supports the `hub-python313-stdlib-v1` container
 contract. Python/dependency/base-image or pinned-supervisor changes require a
 separate reviewed container/bootstrap update. For those changes, record image
-IDs, back up the dataset, load immutable image tags and use the supported TrueNAS
+digests, back up the dataset, pull immutable CI images and use the supported TrueNAS
 app update. Never rerun the first-install script over an existing deployment.
 
 ## Collector configuration

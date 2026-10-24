@@ -1,0 +1,145 @@
+name: Hub images
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      arm64:
+        description: Also build linux/arm64 (amd64 is always built for TrueNAS)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  smoke:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Build both targets and verify disposable Compose stack
+        run: python3 tools/verify_hub_containers.py
+
+  # Fork PRs and non-release dispatches have no login or package writes.
+  build:
+    if: github.event_name == 'pull_request' || github.repository != 'weisscorp/assistant-hub' || (github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/'))
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        target: [hub, collectors]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/hub/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: false
+
+  publish:
+    if: github.repository == 'weisscorp/assistant-hub' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: hub
+            image: assistant-hub
+          - target: collectors
+            image: assistant-hub-collectors
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compute unique immutable reference
+        id: ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=main
+          if [ "$REF_TYPE" = tag ]; then
+            version=$(printf '%s' "$REF_NAME" | sed 's/[^a-zA-Z0-9_.-]/-/g' | cut -c1-48)
+          fi
+          tag="${version}-sha-${GITHUB_SHA:0:12}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Refuse publication into an existing non-private package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          status=$(curl --silent --show-error --output /tmp/package.json --write-out '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/orgs/weisscorp/packages/container/$IMAGE")
+          case "$status" in
+            200) test "$(jq -r .visibility /tmp/package.json)" = private ;;
+            404) echo 'New GHCR packages default to private; do not change visibility.' ;;
+            *) echo "Package visibility check failed (HTTP $status)"; exit 1 ;;
+          esac
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        if: inputs.arm64
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish private image
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/hub/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: ${{ inputs.arm64 && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: true
+          tags: ghcr.io/weisscorp/${{ matrix.image }}:${{ steps.ref.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/weisscorp/assistant-hub
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.ref.outputs.tag }}
+          cache-from: type=gha,scope=hub-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=hub-${{ matrix.target }}
+      - name: Record image digest for manual rollout
+        env:
+          IMAGE: ghcr.io/weisscorp/${{ matrix.image }}
+          TAG: ${{ steps.ref.outputs.tag }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          {
+            echo "### $IMAGE"
+            echo "Tag: \`$IMAGE:$TAG\`"
+            echo "Pinned image: \`$IMAGE@$DIGEST\`"
+            echo "Source: \`$GITHUB_SHA\`"
+            echo 'Private GHCR; manual TrueNAS update only. No deployment was performed.'
+          } >> "$GITHUB_STEP_SUMMARY"

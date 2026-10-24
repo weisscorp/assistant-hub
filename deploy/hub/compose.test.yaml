@@ -34,6 +34,7 @@ services:
         apt-get install -y --no-install-recommends ffmpeg libsndfile1 libspeexdsp1
         python -m pip install --no-cache-dir -r tools/test-requirements.txt
         python -m unittest discover -s backend -p 'test_*.py' -q
+        python -m unittest discover -s tools -p 'test_check_ghcr_visibility.py' -q
         python tools/benchmark_knowledge.py --facts 1000 --repetitions 5
   model:
     <<: *sandbox

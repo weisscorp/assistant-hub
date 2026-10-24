@@ -24,4 +24,5 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg libsndfile1 libspeexdsp1
           python -m pip install -r tools/test-requirements.txt
       - run: python -m unittest discover -s backend -p 'test_*.py' -q
+      - run: python -m unittest discover -s tools -p 'test_check_ghcr_visibility.py' -q
       - run: python tools/benchmark_knowledge.py --facts 1000 --repetitions 5

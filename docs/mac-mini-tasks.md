@@ -40,13 +40,19 @@ mcp_servers:
     args: [/absolute/path/to/mini_tasks.py, mcp, --state, /absolute/private/state]
 ```
 
-Five MCP tools are exposed: list, read, select, selected/delivery status, and
+Six MCP tools are exposed: list, read, select, selected/delivery status,
+[read-only durable review context](task-review-api.md), and
 [read-only AO overview](ao-overview.md). The overview uses the configured AO HTTP
 source across all projects, with observation times and explicit unavailability.
 No shell, arbitrary file paths, credential tools or send tool is exposed to the
 model. Each call must reference a live request registered by the gateway.
 The existing hub_hermes_api bridge already supplies the final human prompt,
 topic packet and stable request UUID. No Hub payload change is necessary.
+
+The [durable review contract](task-review-api.md) documents explicit owner
+navigation/decision commands, the authenticated gateway API for future Android
+work, restart recovery and per-decision queue deduplication. Review state and
+decisions live in the private gateway SQLite, with no runtime RCP dependency.
 
 Example requests in the shared Hub topic:
 

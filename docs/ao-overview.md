@@ -2,6 +2,9 @@
 
 The mini gateway exposes `ao_overview` to Hermes through its existing bounded
 MCP catalog. Like the other tools, it requires an active gateway `request_id`.
+The gateway now projects this source into pages of at most 30 cards, with
+1024-byte text fields, `total` and `next_offset`; see the
+[review API contract](task-review-api.md) for limits and read-only tool use.
 It reads all projects' sessions, including orchestrators and terminated sessions;
 it does not restrict the overview to workers created by Hub. It does not select,
 send, spawn, resume or kill sessions. Existing native task read/select/delivery

@@ -1,0 +1,26 @@
+# Synthetic gateway HTTP tests only. No production service, ports or state.
+services:
+  tests:
+    image: python:3.13-slim
+    working_dir: /src
+    volumes:
+      - ..:/src:ro
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    labels:
+      ao.session: ${AO_SESSION_ID:?AO session label required}
+    environment:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: /src/backend
+    command:
+      - python
+      - -m
+      - unittest
+      - backend.test_task_review
+      - backend.test_task_review_http
+      - backend.test_mini_tasks
+      - backend.test_ao_overview
+      - backend.test_hub_hermes_api
+      - -q

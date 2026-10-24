@@ -138,6 +138,10 @@ Launcher owns a separate daemon/data directory on `127.0.0.1:3001`. Its provider
 starts owned Codex worker sessions, gives them a scoped Hub MCP helper and tracks
 session state. It does not attach to all pre-existing AO sessions automatically.
 
+For read-only discovery of existing sessions across all projects on the mini,
+use the gateway’s [AO overview source](ao-overview.md). It is independent of the
+owned-worker provider above and never spawns or sends to sessions.
+
 ## Optional cloud providers
 
 Generated `openai` / `anthropic` entries have an empty model and stay disabled.

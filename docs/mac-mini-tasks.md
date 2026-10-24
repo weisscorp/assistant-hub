@@ -8,7 +8,7 @@ Claude Code owns its login. Never copy OAuth credentials to Hub or NAS.
 
 Runtime files belong outside Git in `~/.local/share/assistant-control`:
 
-- `backend/`: mini_tasks.py, codex_context_bridge.py, agent_hub.py, knowledge_search.py.
+- `backend/`: mini_tasks.py, ao_overview.py, codex_context_bridge.py, agent_hub.py, knowledge_search.py.
 - `state/token`: random Hub-to-mini bearer, mode 0600.
 - `state/mcp-token`: a different random local MCP bearer, mode 0600.
 - `state/tasks.sqlite`: prompts, topic selections and durable delivery state, mode 0600.
@@ -40,7 +40,9 @@ mcp_servers:
     args: [/absolute/path/to/mini_tasks.py, mcp, --state, /absolute/private/state]
 ```
 
-Only four MCP tools are exposed: list, read, select, selected/delivery status.
+Five MCP tools are exposed: list, read, select, selected/delivery status, and
+[read-only AO overview](ao-overview.md). The overview uses the configured AO HTTP
+source across all projects, with observation times and explicit unavailability.
 No shell, arbitrary file paths, credential tools or send tool is exposed to the
 model. Each call must reference a live request registered by the gateway.
 The existing hub_hermes_api bridge already supplies the final human prompt,

@@ -89,7 +89,7 @@ jobs:
         run: |
           version=main
           if [ "$REF_TYPE" = tag ]; then
-            version=$(printf '%s' "$REF_NAME" | sed 's/[^a-zA-Z0-9_.-]/-/g' | cut -c1-48)
+            version="tag-$(printf '%s' "$REF_NAME" | sed 's/[^a-zA-Z0-9_.-]/-/g' | cut -c1-48)"
           fi
           tag="${version}-sha-${GITHUB_SHA:0:12}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

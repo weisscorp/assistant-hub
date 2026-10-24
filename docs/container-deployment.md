@@ -20,8 +20,8 @@ Private packages:
 - `ghcr.io/weisscorp/assistant-hub`
 - `ghcr.io/weisscorp/assistant-hub-collectors`
 
-Tags have the form `<main-or-version>-sha-<12-char-SHA>-run-<run-id>-<attempt>`;
-for example `v1.2.0-sha-0123456789ab-run-123456789-1`. Run/attempt suffixes
+Tags have the form `<main-or-tag-version>-sha-<12-char-SHA>-run-<run-id>-<attempt>`;
+for example `tag-v1.2.0-sha-0123456789ab-run-123456789-1`. Run/attempt suffixes
 prevent reruns from replacing an earlier image. There are no moving `latest`,
 branch or version aliases. The per-image Actions summary records the tag, full
 source SHA and immutable `image@sha256:...` digest. Prefer that digest for

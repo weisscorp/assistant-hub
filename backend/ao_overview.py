@@ -1,7 +1,7 @@
 """Read-only AO session source and conservative task overview projection.
 
 Only GET /api/v1/sessions is used. No credentials, transcripts or raw payloads
-are persisted. Assistant updates remain untrusted reports, not instructions.
+are persisted. The supported AO session-list DTO does not expose task text.
 """
 from copy import deepcopy
 from datetime import datetime
@@ -91,10 +91,13 @@ def normalize(session, observed_at, stale_after):
                    'link': f'ao://sessions/{quote(project, safe="")}/{quote(sid, safe="")}' if project else None},
         'title': session.get('displayName') or sid,
         'expected_result': None,
-        'task_direction': session.get('latestUserPrompt') or None,
+        # AO v0.13.5 SessionView excludes prompt/update metadata. Keep these
+        # reserved fields unavailable until a text source is explicitly chosen.
+        'task_direction': None,
         'executor': {'session_id': sid, 'harness': session.get('harness')},
-        'last_confirmed_action': session.get('latestAssistantUpdate') or None,
-        'action_evidence': 'assistant_report' if session.get('latestAssistantUpdate') else None,
+        'last_confirmed_action': None,
+        'action_evidence': None,
+        'task_text_availability': 'unavailable_in_session_list',
         'next_step': next_step, 'next_step_kind': 'suggested',
         'blocker': blocker, 'expected_decision': decision,
         'status': status, 'status_label': LABELS[status], 'reason': reason,

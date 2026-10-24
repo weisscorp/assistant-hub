@@ -40,9 +40,12 @@ class SourceTests(unittest.TestCase):
         row = result['tasks'][0]
         self.assertEqual(row['source'], {'kind': 'ao', 'project_id': 'demo', 'session_id': 'demo-1', 'link': 'ao://sessions/demo/demo-1'})
         self.assertEqual(row['executor'], {'session_id': 'demo-1', 'harness': 'codex'})
-        self.assertEqual(row['last_confirmed_action'], 'Fixture tests passed.')
-        self.assertEqual(row['action_evidence'], 'assistant_report')
-        self.assertEqual(row['task_direction'], 'Implement the example')
+        for row in result['tasks']:
+            self.assertIsNone(row['task_direction'])
+            self.assertIsNone(row['last_confirmed_action'])
+            self.assertIsNone(row['action_evidence'])
+            self.assertEqual(row['task_text_availability'], 'unavailable_in_session_list')
+        row = result['tasks'][0]
         self.assertIsNone(row['expected_result'])
         self.assertEqual(row['observed_at'], NOW)
         self.assertEqual(row['next_step_kind'], 'suggested')
@@ -129,9 +132,19 @@ class NormalizationTests(unittest.TestCase):
         row = normalize(self.row(projectId='p/a', id='s#'), NOW, 3600)
         self.assertEqual(row['source']['link'], 'ao://sessions/p%2Fa/s%23')
 
+    def test_unsupported_text_keys_do_not_enable_a_new_source_capability(self):
+        # Deliberately non-DTO extension, separate from the supported wire fixture.
+        row = normalize(self.row(latestUserPrompt='Synthetic direction',
+                                 latestAssistantUpdate='Task completed'), NOW, 3600)
+        self.assertEqual(row['status'], 'working')
+        self.assertIsNone(row['task_direction'])
+        self.assertIsNone(row['last_confirmed_action'])
+        self.assertIsNone(row['action_evidence'])
+        self.assertEqual(row['task_text_availability'], 'unavailable_in_session_list')
+
     def test_silence_delivery_text_and_session_exit_are_not_completion(self):
         for text in ['Message accepted', 'Instruction delivered', 'Task completed']:
-            row = normalize(self.row(latestAssistantUpdate=text, status='idle', activity={'state': 'idle'}, lastEventAt=None), NOW, 3600)
+            row = normalize(self.row(displayName=text, status='idle', activity={'state': 'idle'}, lastEventAt=None), NOW, 3600)
             self.assertEqual(row['status'], 'unknown')
         for activity in [{'state': 'exited'}, {'state': 'idle'}]:
             row = normalize(self.row(status='terminated', isTerminated=True, activity=activity), NOW, 3600)

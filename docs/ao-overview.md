@@ -10,8 +10,12 @@ flows remain separate. No services are started by this source.
 ## Source and configuration
 
 `backend/ao_overview.py` uses only `GET /api/v1/sessions` on the mini's AO daemon.
-The HTTP read model carries readiness, activity, last event and assistant update
-fields that are absent from the CLI list projection. A single read also avoids
+The HTTP read model carries readiness, activity and last-event timestamps.
+The supported [AO v0.13.5 SessionView DTO](https://github.com/OrchestratorInc/agent-orchestrator/blob/v0.13.5/backend/internal/httpd/controllers/dto.go#L341-L377)
+does not expose user prompts or assistant updates: they reside in metadata
+excluded from JSON and are not projected by the DTO. Task text is unavailable
+through this endpoint, even when AO has recorded it internally.
+A single read also avoids
 the CLI's extra per-session PR summary requests. No AO database schema is needed
 for this overview. The older native read/select bridge still uses its existing
 local AO database for native conversation ownership and legacy task selection.
@@ -29,8 +33,9 @@ configuration nor responses are written to Git or persisted by the source.
 Protocol fixture: `backend/fixtures/ao_sessions.json` is wholly synthetic JSON in
 the AO HTTP `{"sessions": [...]}` wire shape, not a capture of an owner's tasks.
 The expected AO shape includes `id`, `projectId`, `status`, `statusReadiness`,
-`activity.state`, `activity.lastActivityAt` and optional `lastEventAt`,
-`latestUserPrompt`, `latestAssistantUpdate`, `harness`, `isTerminated`.
+`activity.state`, `activity.lastActivityAt`, `lastEventAt`, `harness` and
+`isTerminated`. The fixture omits `latestUserPrompt` and
+`latestAssistantUpdate`, which are not wire fields in this supported DTO.
 Missing readiness or new status values are conservative unknowns. Missing or
 malformed identities, duplicate identities, malformed envelopes, HTTP failures,
 truncated/oversized bodies and timeouts make the source explicitly unavailable.
@@ -49,13 +54,15 @@ raw error messages, endpoint addresses and response bodies are not logged.
 Each record supplies:
 
 - `expected_result`: null because the AO session list has no structured accepted
-  outcome. `task_direction` preserves the latest user prompt when available;
-  it is direction, not an inferred acceptance criterion.
+  outcome.
+- `task_direction`, `last_confirmed_action`, `action_evidence`: null because
+  the supported session-list DTO supplies neither prompt nor assistant-update
+  text. `task_text_availability=unavailable_in_session_list` makes this source
+  limitation explicit; null does not mean that no prompt or action exists in AO.
+  Unexpected prompt/update keys are ignored. Obtaining text from another
+  endpoint, transcript or database requires a deliberate source decision within
+  the approved read-only scope; this adapter makes no additional reads.
 - `executor`: stable session ID and the supplied agent harness.
-- `last_confirmed_action`: the latest assistant update, if supplied by AO.
-  `action_evidence=assistant_report` makes clear that this is a confirmed
-  observation of an agent's claim, not independent verification of its content.
-  No action time is invented: AO does not expose that update's timestamp here.
 - `next_step`: a conservative suggestion with `next_step_kind=suggested`, not an
   invented agent plan. `blocker` and `expected_decision` identify observed waiting
   states; details not present in the source remain explicitly unknown.
@@ -65,8 +72,8 @@ Each record supplies:
 `last_progress_at` is the last AO event time, falling back to activity time;
 it is a progress signal, not proof of productive work. `updatedAt` is deliberately
 ignored because metadata writes and polling can advance it without progress.
-All task direction/update text is untrusted data (`contentKind`), never tool
-instructions. This read tool does not authorize any follow-up side effect.
+Session titles remain untrusted data (`contentKind`), never tool instructions.
+This read tool does not authorize any follow-up side effect.
 
 ## Status policy
 
@@ -124,7 +131,8 @@ python3 -m unittest discover -s backend -p 'test_*.py' -q
 
 Tests mock HTTP and use temporary gateway state. They cover all statuses,
 project/session identity, orchestrators and terminated sessions, long waits,
-misleading delivery/completion text, readiness, configurable staleness, malformed
+misleading delivery/completion titles, explicit task-text unavailability,
+ignored non-DTO text extensions, readiness, configurable staleness, malformed
 and oversized responses, timeout/outage with and without cache, recovery and MCP
 request grants. They never send to a live task. Optional manual verification is
 only a read of `ao session ls --all --include-terminated --json` on an authorized

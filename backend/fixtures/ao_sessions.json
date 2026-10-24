@@ -4,8 +4,7 @@
       "id": "demo-1", "projectId": "demo", "displayName": "Build synthetic example",
       "kind": "worker", "harness": "codex", "statusReadiness": "ready",
       "status": "working", "activity": {"state": "active", "lastActivityAt": "2026-10-22T10:00:00Z"},
-      "lastEventAt": "2026-10-22T10:00:00Z", "updatedAt": "2026-10-22T10:00:00Z",
-      "latestUserPrompt": "Implement the example", "latestAssistantUpdate": "Fixture tests passed."
+      "lastEventAt": "2026-10-22T10:00:00Z", "updatedAt": "2026-10-22T10:00:00Z"
     },
     {
       "id": "demo-2", "projectId": "demo", "harness": "claude-code",
